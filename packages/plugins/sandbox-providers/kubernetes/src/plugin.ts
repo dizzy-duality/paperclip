@@ -119,10 +119,15 @@ const readySandboxesByLease = new Set<string>();
 const RESUME_READY_TIMEOUT_MS = 30_000;
 const RESUME_READY_POLL_MS = 1_000;
 
-// The workspace remote dir is the confinement root for native file sync. It is
-// recorded on the lease metadata at realizeWorkspace time (`remoteCwd`); require
-// it so a sync can never run without a concrete root to confine every sandbox
-// path against.
+// The agent pod's workspace mount (see pod-spec-builder / sandbox-cr-builder).
+const WORKSPACE_DIR = "/workspace";
+
+// The workspace remote dir is the confinement root for native file sync. The
+// lease carries it as `remoteCwd` from acquire/resume onward: the server reads
+// it before realizeWorkspace runs (to build the remote execution target and its
+// runtime dir), and it does not copy realizeWorkspace's metadata back onto the
+// lease (paperclipai/paperclip#13587, #13864). Require it so a sync can never
+// run without a concrete root to confine every sandbox path against.
 function resolveSyncRemoteDir(lease: PluginEnvironmentLease): string {
   const remoteCwd = lease.metadata?.remoteCwd;
   if (typeof remoteCwd === "string" && remoteCwd.trim().length > 0) {
@@ -460,6 +465,8 @@ const plugin = definePlugin({
       // exposes one. Flag the job backend so the server keeps the base64 fallback
       // rather than routing its sync to a hook that would reject immediately.
       nativeFileSyncUnsupported: config.backend !== "sandbox-cr",
+      // The sync root and remote cwd, available before realizeWorkspace runs.
+      remoteCwd: WORKSPACE_DIR,
     };
 
     return {
@@ -539,6 +546,12 @@ const plugin = definePlugin({
       // See acquireLease: only the sandbox-cr backend has a pod-exec channel for
       // native sync, so a resumed job lease must keep the base64 fallback.
       nativeFileSyncUnsupported: leaseBackend !== "sandbox-cr",
+      // Keep a root recorded earlier for this lease; otherwise the pod's mount.
+      remoteCwd:
+        typeof params.leaseMetadata?.remoteCwd === "string" &&
+        params.leaseMetadata.remoteCwd.trim().length > 0
+          ? params.leaseMetadata.remoteCwd.trim()
+          : WORKSPACE_DIR,
     };
 
     return {
@@ -559,7 +572,7 @@ const plugin = definePlugin({
     const cwd =
       params.workspace.remotePath && params.workspace.remotePath.trim().length > 0
         ? params.workspace.remotePath.trim()
-        : "/workspace";
+        : WORKSPACE_DIR;
     return {
       cwd,
       metadata: {

@@ -105,4 +105,10 @@ export interface KubernetesLeaseMetadata {
    * sync may be used when the worker advertises the verbs.
    */
   nativeFileSyncUnsupported?: boolean;
+  /**
+   * Workspace root in the pod: the native file-sync confinement root and the
+   * remote cwd the server builds the execution target from. Set at acquire and
+   * kept on resume, because the server reads it before realizeWorkspace runs.
+   */
+  remoteCwd?: string;
 }
