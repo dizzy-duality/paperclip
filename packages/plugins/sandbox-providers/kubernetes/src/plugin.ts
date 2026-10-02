@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { definePlugin } from "@paperclipai/plugin-sdk";
 import type {
   PluginEnvironmentAcquireLeaseParams,
@@ -36,7 +36,7 @@ import {
   sandboxCrOrchestrator,
   SandboxCrTimeoutError,
 } from "./sandbox-cr-orchestrator.js";
-import { execInPod, execInPodStreaming, wrapCommandWithEnv } from "./pod-exec.js";
+import { execInPod, execInPodStreaming, stageCommandEnv } from "./pod-exec.js";
 import { performSyncIn, performSyncOut, type PodStreamExec } from "./file-sync.js";
 import { checkLeaseResumable, destroyLeaseResources } from "./lease-lifecycle.js";
 import {
@@ -878,7 +878,51 @@ const plugin = definePlugin({
       // OpenCode config, plus helper settings like small_model/provider routing) never
       // reaches the harness, which falls back to its in-image HOME config -> wrong or
       // partial behaviour.
-      const execCommand = wrapCommandWithEnv(baseExecCommand, params.env);
+      // The values go to the pod over stdin, never on a command line (see
+      // stageCommandEnv in pod-exec.ts).
+      const staged = stageCommandEnv(
+        baseExecCommand,
+        params.env,
+        `${lease.providerLeaseId}-${randomUUID()}`,
+      );
+      const execMetadata = {
+        provider: "kubernetes",
+        backend: "sandbox-cr",
+        namespace,
+        sandboxName: lease.providerLeaseId,
+        podName,
+      };
+      if (staged) {
+        try {
+          const stageResult = await execInPod(
+            kc,
+            namespace,
+            podName,
+            "agent",
+            staged.stageCommand,
+            staged.stageStdin,
+            Math.max(5_000, effectiveTimeoutMs - (Date.now() - executeStartedAt)),
+          );
+          if (stageResult.exitCode !== 0) {
+            return {
+              exitCode: stageResult.exitCode,
+              timedOut: false,
+              stdout: "",
+              stderr: `could not stage the run environment in the pod: ${stageResult.stderr}`,
+              metadata: execMetadata,
+            };
+          }
+        } catch (err) {
+          return {
+            exitCode: null,
+            timedOut: true,
+            stdout: "",
+            stderr: `could not stage the run environment in the pod: ${err instanceof Error ? err.message : String(err)}`,
+            metadata: execMetadata,
+          };
+        }
+      }
+      const execCommand = staged ? staged.runCommand : baseExecCommand;
 
       // Remaining share of the caller's budget after the readiness wait (floor
       // of 5s so an exec attempt is still made when readiness consumed most of
