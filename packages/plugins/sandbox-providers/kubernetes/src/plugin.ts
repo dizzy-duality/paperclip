@@ -722,10 +722,11 @@ const plugin = definePlugin({
       // declaration for rationale.
       const podAlreadyKnownReady = readySandboxesByLease.has(lease.providerLeaseId);
 
-      // The caller's timeout is a budget for the WHOLE execute call: readiness
-      // wait + exec must share it, or the first exec on a fresh lease could
-      // block for up to twice the requested timeout.
-      const executeStartedAt = Date.now();
+      // Waiting for a fresh pod (scheduling, image pull) has its own budget,
+      // podReadyTimeoutSec. It used to share the caller's timeout, so the first
+      // command on a node that still had to pull the image (16 s for the
+      // 333 MB Claude runtime) ran out of a 15 s budget before it started.
+      const readyTimeoutMs = config.podReadyTimeoutSec * 1000;
 
       if (!podAlreadyKnownReady) {
         try {
@@ -733,7 +734,7 @@ const plugin = definePlugin({
             clients,
             namespace,
             lease.providerLeaseId,
-            { timeoutMs: effectiveTimeoutMs, pollMs: 2000 },
+            { timeoutMs: readyTimeoutMs, pollMs: 2000 },
           );
           readySandboxesByLease.add(lease.providerLeaseId);
         } catch (err) {
@@ -742,7 +743,7 @@ const plugin = definePlugin({
               exitCode: null,
               timedOut: true,
               stdout: "",
-              stderr: `Sandbox pod did not become Ready within ${effectiveTimeoutMs}ms`,
+              stderr: `Sandbox pod did not become Ready within ${readyTimeoutMs}ms`,
               metadata: {
                 provider: "kubernetes",
                 backend: "sandbox-cr",
@@ -754,6 +755,9 @@ const plugin = definePlugin({
           throw err;
         }
       }
+
+      // The caller's timeout covers the command(s) from here on.
+      const executeStartedAt = Date.now();
 
       // Resolve pod name (may now be populated in Sandbox status).
       if (!podName) {
@@ -937,9 +941,8 @@ const plugin = definePlugin({
       }
       const execCommand = staged ? staged.runCommand : baseExecCommand;
 
-      // Remaining share of the caller's budget after the readiness wait (floor
-      // of 5s so an exec attempt is still made when readiness consumed most of
-      // it; the watchdog then bounds it tightly).
+      // Remaining share of the caller's budget after staging the env (floor of
+      // 5s so an exec attempt is still made; the watchdog then bounds it tightly).
       const remainingTimeoutMs = Math.max(
         5_000,
         effectiveTimeoutMs - (Date.now() - executeStartedAt),

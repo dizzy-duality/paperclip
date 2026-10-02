@@ -97,6 +97,12 @@ const manifest: PaperclipPluginManifestV1 = {
             minimum: 1,
             description: "Hard ceiling on a single run's wall-clock time (default: 3600).",
           },
+          podReadyTimeoutSec: {
+            type: "integer",
+            minimum: 1,
+            description:
+              "How long the first command on a fresh sandbox-cr pod may wait for the pod to become Ready, e.g. while its image is pulled. Not counted against the command's own timeout (default: 180).",
+          },
           adapterType: {
             type: "string",
             description:
