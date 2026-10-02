@@ -737,13 +737,25 @@ const plugin = definePlugin({
       // 15 s budget before it started.
       const executeStartedAt = Date.now();
       const executeBudgetMs = effectiveTimeoutMs + READY_GRACE_MS;
-      // Time left for a command: its own timeout, cut short only when
-      // readiness overran the grace; floor of 5s so an attempt is still made.
+      const executeDeadline = executeStartedAt + executeBudgetMs;
+      // Time left for the next exec: the command's own timeout, cut short only
+      // when readiness (and staging) used more than the grace. Every exec of
+      // this call draws on the same deadline, so together they stay inside the
+      // server's RPC deadline; 0 means the budget is spent.
       const commandTimeoutMs = () =>
-        Math.min(
-          effectiveTimeoutMs,
-          Math.max(5_000, executeBudgetMs - (Date.now() - executeStartedAt)),
-        );
+        Math.max(0, Math.min(effectiveTimeoutMs, executeDeadline - Date.now()));
+      const budgetSpent = (stage: string) => ({
+        exitCode: null,
+        timedOut: true,
+        stdout: "",
+        stderr: `execute budget of ${executeBudgetMs}ms spent before ${stage}`,
+        metadata: {
+          provider: "kubernetes",
+          backend: "sandbox-cr",
+          namespace,
+          sandboxName: lease.providerLeaseId,
+        },
+      });
 
       if (!podAlreadyKnownReady) {
         try {
@@ -848,6 +860,7 @@ const plugin = definePlugin({
           // as the normal exec path below) and surfaces watchdog/WebSocket
           // failures as a timed-out result instead of an uncaught throw.
           const flushTimeoutMs = commandTimeoutMs();
+          if (flushTimeoutMs === 0) return budgetSpent("the upload");
           let flushResult: { exitCode: number; stdout: string; stderr: string };
           try {
             flushResult = await execInPod(
@@ -917,6 +930,8 @@ const plugin = definePlugin({
         podName,
       };
       if (staged) {
+        const stageTimeoutMs = commandTimeoutMs();
+        if (stageTimeoutMs === 0) return budgetSpent("staging the run environment");
         try {
           const stageResult = await execInPod(
             kc,
@@ -925,7 +940,7 @@ const plugin = definePlugin({
             "agent",
             staged.stageCommand,
             staged.stageStdin,
-            commandTimeoutMs(),
+            stageTimeoutMs,
           );
           if (stageResult.exitCode !== 0) {
             return {
@@ -949,6 +964,7 @@ const plugin = definePlugin({
       const execCommand = staged ? staged.runCommand : baseExecCommand;
 
       const remainingTimeoutMs = commandTimeoutMs();
+      if (remainingTimeoutMs === 0) return budgetSpent("the command");
 
       let execResult: { exitCode: number; stdout: string; stderr: string };
       try {

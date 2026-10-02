@@ -8,6 +8,8 @@ const h = vi.hoisted(() => ({
   readyWaitMs: 0,
   readyTimeoutMs: 0,
   execTimeoutMs: 0,
+  stageMs: 0,
+  execs: [] as Array<{ command: string[]; timeoutMs: number }>,
 }));
 
 vi.mock("../../src/kube-client.js", () => ({
@@ -35,8 +37,11 @@ vi.mock("../../src/pod-exec.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../src/pod-exec.js")>();
   return {
     ...actual,
-    execInPod: vi.fn(async (_kc: unknown, _ns: string, _p: string, _c: string, _cmd: string[], _in?: unknown, timeoutMs?: number) => {
+    execInPod: vi.fn(async (_kc: unknown, _ns: string, _p: string, _c: string, cmd: string[], _in?: unknown, timeoutMs?: number) => {
+      h.execs.push({ command: cmd, timeoutMs: timeoutMs ?? 0 });
       h.execTimeoutMs = timeoutMs ?? 0;
+      // Staging takes h.stageMs of wall-clock time.
+      if (cmd.join(" ").includes("head -c")) vi.setSystemTime(Date.now() + h.stageMs);
       return { exitCode: 0, stdout: "", stderr: "" };
     }),
   };
@@ -45,6 +50,8 @@ vi.mock("../../src/pod-exec.js", async (importOriginal) => {
 import plugin from "../../src/plugin.js";
 
 beforeEach(() => {
+  h.execs = [];
+  h.stageMs = 0;
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new Date("2026-10-02T10:00:00Z"));
 });
@@ -52,7 +59,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-async function executeOnFreshLease(leaseId: string) {
+async function executeOnFreshLease(leaseId: string, env?: Record<string, string>) {
   return plugin.definition.onEnvironmentExecute!({
     driverKey: "kubernetes",
     companyId: "acme",
@@ -62,6 +69,7 @@ async function executeOnFreshLease(leaseId: string) {
     command: "sh",
     args: ["-c", "git rev-parse --show-toplevel"],
     timeoutMs: 15_000,
+    env,
   } as never);
 }
 
@@ -83,5 +91,19 @@ describe("onEnvironmentExecute readiness grace", () => {
     h.readyWaitMs = 30_000;
     await executeOnFreshLease("pc-very-slow");
     expect(h.execTimeoutMs).toBe(10_000);
+  });
+
+  it("charges staging and the command against one deadline", async () => {
+    h.readyWaitMs = 30_000;
+    h.stageMs = 6_000;
+    await executeOnFreshLease("pc-staged", { TOKEN: "x" });
+    expect(h.execs.map((e) => e.timeoutMs)).toEqual([10_000, 4_000]);
+  });
+
+  it("does not start a command once the deadline has passed", async () => {
+    h.readyWaitMs = 41_000;
+    const result = await executeOnFreshLease("pc-too-slow");
+    expect(h.execs).toHaveLength(0);
+    expect(result.timedOut).toBe(true);
   });
 });

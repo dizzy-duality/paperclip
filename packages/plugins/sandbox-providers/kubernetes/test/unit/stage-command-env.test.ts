@@ -83,16 +83,4 @@ describe("stageCommandEnv in a real shell", () => {
     expect(r.status).not.toBe(0);
     expect(fs.existsSync(file)).toBe(false);
   });
-
-  it("removes env files a previous run left behind", () => {
-    const dir = newDir();
-    fs.mkdirSync(dir, { recursive: true });
-    const leftover = path.join(dir, "left-behind");
-    fs.writeFileSync(leftover, "export TOKEN='old'\n", { mode: 0o600 });
-    const old = new Date(Date.now() - 5 * 60_000);
-    fs.utimesSync(leftover, old, old);
-    const { file } = stage({ V: "x" }, ["/bin/true"], dir);
-    expect(fs.existsSync(leftover)).toBe(false);
-    expect(fs.existsSync(file)).toBe(true);
-  });
 });

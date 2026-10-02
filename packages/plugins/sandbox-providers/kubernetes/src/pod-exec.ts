@@ -50,11 +50,6 @@ export interface StagedCommandEnv {
   file: string;
 }
 
-// An env file lives only between the stage and run execs, normally
-// milliseconds. One left behind (the run exec never started: a dropped
-// connection, a worker that died in between) is removed by the next staging
-// once it is older than this.
-const STALE_ENV_FILE_MINUTES = 1;
 
 // Give a command the caller's env without putting the values on its command line.
 //
@@ -69,6 +64,13 @@ const STALE_ENV_FILE_MINUTES = 1;
 //   2. run: the command runs as `sh -c '… . /dev/fd/3 … exec "$@"' FILE cmd…`,
 //      which deletes the file, loads it, and becomes the command.
 // Only the file path and the original command reach any argv.
+//
+// If the run exec never starts (a dropped connection, a worker that died in
+// between), the file stays until the pod goes. That is bounded: a sandbox pod
+// serves one lease and its /tmp emptyDir is deleted with it, and the file holds
+// only values the agent's own processes receive anyway, readable only by that
+// same uid. Sweeping old files instead would race a slow run exec of another
+// command on the same lease.
 //
 // PATH is deliberately skipped (the caller's PATH is the orchestrator's, not the
 // sandbox image's, and overriding it would break command resolution), and only
@@ -93,9 +95,7 @@ export function stageCommandEnv(
     stageCommand: [
       "/bin/sh",
       "-c",
-      `umask 077 && mkdir -p ${shQuote(dir)} && ` +
-        `{ find ${shQuote(dir)} -type f -mmin +${STALE_ENV_FILE_MINUTES} -delete 2>/dev/null || true; } && ` +
-        `head -c ${stageStdin.length} > ${shQuote(file)}`,
+      `umask 077 && mkdir -p ${shQuote(dir)} && head -c ${stageStdin.length} > ${shQuote(file)}`,
     ],
     stageStdin,
     runCommand: [
