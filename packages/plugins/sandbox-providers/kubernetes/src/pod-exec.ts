@@ -18,6 +18,7 @@
  * connection. We then close the WebSocket explicitly inside the statusCallback.
  */
 
+import { randomUUID } from "node:crypto";
 import { Exec } from "@kubernetes/client-node";
 import { PassThrough } from "node:stream";
 import type { Readable, Writable } from "node:stream";
@@ -34,24 +35,81 @@ export function shQuote(segment: string): string {
   return `'${segment.replace(/'/g, "'\\''")}'`;
 }
 
-// Wrap a command so the given env vars are exported before it runs. The Kubernetes
-// exec API has no env field, so the only way to give an exec'd process additional
-// env is to run it under a shell that exports the vars and then `exec`s the real
-// command. PATH is deliberately skipped (the caller's PATH is the orchestrator's,
-// not the sandbox image's, and overriding it would break command resolution), and
-// only valid shell identifiers are exported. Returns the original command unchanged
-// when there is nothing to apply.
-export function wrapCommandWithEnv(
+/** Writable directory in the agent pod (the `/tmp` emptyDir) for staged env files. */
+export const ENV_STAGE_DIR = "/tmp/.paperclip-env";
+
+/** The two execs that run a command with a caller-supplied environment. */
+export interface StagedCommandEnv {
+  /** Writes the env file. Its stdin is {@link stageStdin}; its argv carries no values. */
+  stageCommand: string[];
+  /** `export K='v'` lines, delivered over the exec's stdin channel. */
+  stageStdin: Buffer;
+  /** Loads and deletes the env file, then `exec`s the original command. */
+  runCommand: string[];
+  /** Path of the env file in the pod. */
+  file: string;
+}
+
+
+// Give a command the caller's env without putting the values on its command line.
+//
+// The Kubernetes exec API has no env field. Exporting the values inline
+// (`sh -c "export TOKEN='…'; exec cmd"`) puts them in the exec request, where
+// the API server's audit log can record them, and in the shell's argv, where
+// any process in the pod can read them from /proc/<pid>/cmdline. Instead:
+//   1. stage: a first exec writes `export K='v'` lines, received on stdin, to a
+//      0600 file under ENV_STAGE_DIR. `head -c <bytes>` reads exactly that many
+//      bytes, so this does not depend on WebSocket EOF detection (the same
+//      technique as the fast-upload flush in plugin.ts);
+//   2. run: the command runs as `sh -c '… . /dev/fd/3 … exec "$@"' FILE cmd…`,
+//      which deletes the file, loads it, and becomes the command.
+// Only the file path and the original command reach any argv.
+//
+// If the run exec never starts (a dropped connection, a worker that died in
+// between), the file stays until the pod goes. That is bounded: a sandbox pod
+// serves one lease and its /tmp emptyDir is deleted with it, and the file holds
+// only values the agent's own processes receive anyway, readable only by that
+// same uid. Sweeping old files instead would race a slow run exec of another
+// command on the same lease.
+//
+// PATH is deliberately skipped (the caller's PATH is the orchestrator's, not the
+// sandbox image's, and overriding it would break command resolution), and only
+// valid shell identifiers are exported. Returns null when there is nothing to
+// apply, so the caller runs the command unchanged.
+export function stageCommandEnv(
   command: string[],
   env: Record<string, string> | undefined | null,
-): string[] {
+  dir: string = ENV_STAGE_DIR,
+): StagedCommandEnv | null {
   const entries = Object.entries(env && typeof env === "object" ? env : {}).filter(
     ([key, value]) =>
       typeof value === "string" && key !== "PATH" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(key),
   );
-  if (entries.length === 0) return command;
-  const exports = entries.map(([k, v]) => `export ${k}=${shQuote(v)};`).join(" ");
-  return ["/bin/sh", "-c", `${exports} exec ${command.map(shQuote).join(" ")}`];
+  if (entries.length === 0) return null;
+  const file = `${dir}/${randomUUID()}`;
+  const stageStdin = Buffer.from(
+    entries.map(([k, v]) => `export ${k}=${shQuote(v)}\n`).join(""),
+    "utf8",
+  );
+  return {
+    stageCommand: [
+      "/bin/sh",
+      "-c",
+      `umask 077 && mkdir -p ${shQuote(dir)} && head -c ${stageStdin.length} > ${shQuote(file)}`,
+    ],
+    stageStdin,
+    runCommand: [
+      "/bin/sh",
+      "-c",
+      // Open, delete, then load from the open descriptor: the file is gone
+      // before it is parsed, so even a load failure (which makes a POSIX sh
+      // exit on `.`) cannot leave the values on disk.
+      'exec 3<"$0" && rm -f "$0" && . /dev/fd/3 && exec 3<&- && exec "$@"',
+      file,
+      ...command,
+    ],
+    file,
+  };
 }
 
 export async function execInPod(
