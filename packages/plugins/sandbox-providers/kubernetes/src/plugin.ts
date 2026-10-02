@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { definePlugin } from "@paperclipai/plugin-sdk";
 import type {
   PluginEnvironmentAcquireLeaseParams,
@@ -118,6 +118,13 @@ const readySandboxesByLease = new Set<string>();
 // faster and more reliable than waiting.
 const RESUME_READY_TIMEOUT_MS = 30_000;
 const RESUME_READY_POLL_MS = 1_000;
+
+// Extra time a fresh pod may take to become Ready, on top of the command's own
+// timeout. The server bounds each environmentExecute RPC at the requested
+// timeout plus 30 s (RPC_OVERHEAD_BUFFER_MS in plugin-environment-driver.ts),
+// so this must stay below 30 s or the server gives up first. Pre-pulling the
+// runtime image keeps readiness well inside it.
+const READY_GRACE_MS = 25_000;
 
 // The agent pod's workspace mount (see pod-spec-builder / sandbox-cr-builder).
 const WORKSPACE_DIR = "/workspace";
@@ -722,11 +729,21 @@ const plugin = definePlugin({
       // declaration for rationale.
       const podAlreadyKnownReady = readySandboxesByLease.has(lease.providerLeaseId);
 
-      // Waiting for a fresh pod (scheduling, image pull) has its own budget,
-      // podReadyTimeoutSec. It used to share the caller's timeout, so the first
-      // command on a node that still had to pull the image (16 s for the
-      // 333 MB Claude runtime) ran out of a 15 s budget before it started.
-      const readyTimeoutMs = config.podReadyTimeoutSec * 1000;
+      // Waiting for a fresh pod (scheduling, image pull) gets READY_GRACE_MS on
+      // top of the caller's timeout, and the command keeps its full timeout as
+      // long as readiness fits in that grace. It used to come out of the
+      // caller's timeout alone, so the first command on a node that still had
+      // to pull the image (16 s for the 333 MB Claude runtime) ran out of a
+      // 15 s budget before it started.
+      const executeStartedAt = Date.now();
+      const executeBudgetMs = effectiveTimeoutMs + READY_GRACE_MS;
+      // Time left for a command: its own timeout, cut short only when
+      // readiness overran the grace; floor of 5s so an attempt is still made.
+      const commandTimeoutMs = () =>
+        Math.min(
+          effectiveTimeoutMs,
+          Math.max(5_000, executeBudgetMs - (Date.now() - executeStartedAt)),
+        );
 
       if (!podAlreadyKnownReady) {
         try {
@@ -734,7 +751,7 @@ const plugin = definePlugin({
             clients,
             namespace,
             lease.providerLeaseId,
-            { timeoutMs: readyTimeoutMs, pollMs: 2000 },
+            { timeoutMs: executeBudgetMs, pollMs: 2000 },
           );
           readySandboxesByLease.add(lease.providerLeaseId);
         } catch (err) {
@@ -743,7 +760,7 @@ const plugin = definePlugin({
               exitCode: null,
               timedOut: true,
               stdout: "",
-              stderr: `Sandbox pod did not become Ready within ${readyTimeoutMs}ms`,
+              stderr: `Sandbox pod did not become Ready within ${executeBudgetMs}ms`,
               metadata: {
                 provider: "kubernetes",
                 backend: "sandbox-cr",
@@ -755,9 +772,6 @@ const plugin = definePlugin({
           throw err;
         }
       }
-
-      // The caller's timeout covers the command(s) from here on.
-      const executeStartedAt = Date.now();
 
       // Resolve pod name (may now be populated in Sandbox status).
       if (!podName) {
@@ -833,10 +847,7 @@ const plugin = definePlugin({
           // The flush shares the caller's single execute budget (same contract
           // as the normal exec path below) and surfaces watchdog/WebSocket
           // failures as a timed-out result instead of an uncaught throw.
-          const flushTimeoutMs = Math.max(
-            5_000,
-            effectiveTimeoutMs - (Date.now() - executeStartedAt),
-          );
+          const flushTimeoutMs = commandTimeoutMs();
           let flushResult: { exitCode: number; stdout: string; stderr: string };
           try {
             flushResult = await execInPod(
@@ -897,11 +908,7 @@ const plugin = definePlugin({
       // partial behaviour.
       // The values go to the pod over stdin, never on a command line (see
       // stageCommandEnv in pod-exec.ts).
-      const staged = stageCommandEnv(
-        baseExecCommand,
-        params.env,
-        `${lease.providerLeaseId}-${randomUUID()}`,
-      );
+      const staged = stageCommandEnv(baseExecCommand, params.env);
       const execMetadata = {
         provider: "kubernetes",
         backend: "sandbox-cr",
@@ -918,7 +925,7 @@ const plugin = definePlugin({
             "agent",
             staged.stageCommand,
             staged.stageStdin,
-            Math.max(5_000, effectiveTimeoutMs - (Date.now() - executeStartedAt)),
+            commandTimeoutMs(),
           );
           if (stageResult.exitCode !== 0) {
             return {
@@ -941,12 +948,7 @@ const plugin = definePlugin({
       }
       const execCommand = staged ? staged.runCommand : baseExecCommand;
 
-      // Remaining share of the caller's budget after staging the env (floor of
-      // 5s so an exec attempt is still made; the watchdog then bounds it tightly).
-      const remainingTimeoutMs = Math.max(
-        5_000,
-        effectiveTimeoutMs - (Date.now() - executeStartedAt),
-      );
+      const remainingTimeoutMs = commandTimeoutMs();
 
       let execResult: { exitCode: number; stdout: string; stderr: string };
       try {

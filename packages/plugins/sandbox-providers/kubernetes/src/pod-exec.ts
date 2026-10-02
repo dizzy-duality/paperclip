@@ -18,6 +18,7 @@
  * connection. We then close the WebSocket explicitly inside the statusCallback.
  */
 
+import { randomUUID } from "node:crypto";
 import { Exec } from "@kubernetes/client-node";
 import { PassThrough } from "node:stream";
 import type { Readable, Writable } from "node:stream";
@@ -45,7 +46,15 @@ export interface StagedCommandEnv {
   stageStdin: Buffer;
   /** Loads and deletes the env file, then `exec`s the original command. */
   runCommand: string[];
+  /** Path of the env file in the pod. */
+  file: string;
 }
+
+// An env file lives only between the stage and run execs, normally
+// milliseconds. One left behind (the run exec never started: a dropped
+// connection, a worker that died in between) is removed by the next staging
+// once it is older than this.
+const STALE_ENV_FILE_MINUTES = 1;
 
 // Give a command the caller's env without putting the values on its command line.
 //
@@ -64,12 +73,10 @@ export interface StagedCommandEnv {
 // PATH is deliberately skipped (the caller's PATH is the orchestrator's, not the
 // sandbox image's, and overriding it would break command resolution), and only
 // valid shell identifiers are exported. Returns null when there is nothing to
-// apply, so the caller runs the command unchanged. `name` must be unique per
-// call; it becomes the file name.
+// apply, so the caller runs the command unchanged.
 export function stageCommandEnv(
   command: string[],
   env: Record<string, string> | undefined | null,
-  name: string,
   dir: string = ENV_STAGE_DIR,
 ): StagedCommandEnv | null {
   const entries = Object.entries(env && typeof env === "object" ? env : {}).filter(
@@ -77,10 +84,7 @@ export function stageCommandEnv(
       typeof value === "string" && key !== "PATH" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(key),
   );
   if (entries.length === 0) return null;
-  if (!/^[A-Za-z0-9._-]+$/.test(name)) {
-    throw new Error(`invalid env stage file name: ${name}`);
-  }
-  const file = `${dir}/${name}`;
+  const file = `${dir}/${randomUUID()}`;
   const stageStdin = Buffer.from(
     entries.map(([k, v]) => `export ${k}=${shQuote(v)}\n`).join(""),
     "utf8",
@@ -89,7 +93,9 @@ export function stageCommandEnv(
     stageCommand: [
       "/bin/sh",
       "-c",
-      `umask 077 && mkdir -p ${shQuote(dir)} && head -c ${stageStdin.length} > ${shQuote(file)}`,
+      `umask 077 && mkdir -p ${shQuote(dir)} && ` +
+        `{ find ${shQuote(dir)} -type f -mmin +${STALE_ENV_FILE_MINUTES} -delete 2>/dev/null || true; } && ` +
+        `head -c ${stageStdin.length} > ${shQuote(file)}`,
     ],
     stageStdin,
     runCommand: [
@@ -102,6 +108,7 @@ export function stageCommandEnv(
       file,
       ...command,
     ],
+    file,
   };
 }
 

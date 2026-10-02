@@ -9,13 +9,13 @@ const SECRET = "sk-ant-oat01-SECRET'with\"quotes $(id) `id` ü";
 
 describe("stageCommandEnv", () => {
   it("returns null when there is nothing to apply", () => {
-    expect(stageCommandEnv(["claude"], undefined, "n")).toBeNull();
-    expect(stageCommandEnv(["claude"], {}, "n")).toBeNull();
-    expect(stageCommandEnv(["claude"], { PATH: "/server/bin" }, "n")).toBeNull();
+    expect(stageCommandEnv(["claude"], undefined)).toBeNull();
+    expect(stageCommandEnv(["claude"], {})).toBeNull();
+    expect(stageCommandEnv(["claude"], { PATH: "/server/bin" })).toBeNull();
   });
 
   it("keeps every value out of both commands' argv", () => {
-    const staged = stageCommandEnv(["claude", "--print"], { CLAUDE_CODE_OAUTH_TOKEN: SECRET, X: "plain-value" }, "pc-1-a")!;
+    const staged = stageCommandEnv(["claude", "--print"], { CLAUDE_CODE_OAUTH_TOKEN: SECRET, X: "plain-value" })!;
     const argv = [...staged.stageCommand, ...staged.runCommand].join("\n");
     expect(argv).not.toContain("sk-ant-oat01");
     expect(argv).not.toContain("plain-value");
@@ -24,7 +24,7 @@ describe("stageCommandEnv", () => {
   });
 
   it("tells head the exact UTF-8 byte count of stdin", () => {
-    const staged = stageCommandEnv(["c"], { V: "ü€" }, "n")!;
+    const staged = stageCommandEnv(["c"], { V: "ü€" })!;
     expect(staged.stageCommand[2]).toContain(`head -c ${staged.stageStdin.length} `);
     expect(staged.stageStdin.length).toBeGreaterThan(staged.stageStdin.toString("utf8").length);
   });
@@ -36,12 +36,8 @@ describe("stageCommandEnv", () => {
       GOOD_KEY: "y",
       // @ts-expect-error intentional non-string to exercise the guard
       NUMERIC: 5,
-    }, "n")!.stageStdin.toString("utf8");
+    })!.stageStdin.toString("utf8");
     expect(stdin).toBe("export GOOD_KEY='y'\n");
-  });
-
-  it("rejects a file name that could escape the stage directory", () => {
-    expect(() => stageCommandEnv(["c"], { V: "x" }, "../etc/x")).toThrow(/invalid env stage file name/);
   });
 });
 
@@ -51,13 +47,17 @@ describe("stageCommandEnv in a real shell", () => {
     for (const d of dirs.splice(0)) fs.rmSync(d, { recursive: true, force: true });
   });
 
-  function stage(env: Record<string, string>, command: string[]) {
-    const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pc-env-")), "stage");
-    dirs.push(path.dirname(dir));
-    const staged = stageCommandEnv(command, env, "run-1", dir)!;
+  function stage(env: Record<string, string>, command: string[], dir = newDir()) {
+    const staged = stageCommandEnv(command, env, dir)!;
     const s = spawnSync(staged.stageCommand[0]!, staged.stageCommand.slice(1), { input: staged.stageStdin });
     expect(s.status).toBe(0);
-    return { staged, file: path.join(dir, "run-1") };
+    return { staged, file: staged.file };
+  }
+
+  function newDir() {
+    const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pc-env-")), "stage");
+    dirs.push(path.dirname(dir));
+    return dir;
   }
 
   it("delivers the exact values, writes the file 0600, and deletes it", () => {
@@ -82,5 +82,17 @@ describe("stageCommandEnv in a real shell", () => {
     const r = spawnSync(staged.runCommand[0]!, staged.runCommand.slice(1));
     expect(r.status).not.toBe(0);
     expect(fs.existsSync(file)).toBe(false);
+  });
+
+  it("removes env files a previous run left behind", () => {
+    const dir = newDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const leftover = path.join(dir, "left-behind");
+    fs.writeFileSync(leftover, "export TOKEN='old'\n", { mode: 0o600 });
+    const old = new Date(Date.now() - 5 * 60_000);
+    fs.utimesSync(leftover, old, old);
+    const { file } = stage({ V: "x" }, ["/bin/true"], dir);
+    expect(fs.existsSync(leftover)).toBe(false);
+    expect(fs.existsSync(file)).toBe(true);
   });
 });

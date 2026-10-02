@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-// A fresh pod's readiness wait (scheduling, image pull) must not eat the
-// command's own timeout: the first command on a node that still had to pull a
-// 333 MB image used to fail its 15 s budget before it started.
+// A fresh pod's readiness wait (scheduling, image pull) gets a grace period on
+// top of the command's timeout: the first command on a node that still had to
+// pull a 333 MB image used to fail its 15 s budget before it started. The grace
+// stays under the server's 30 s RPC overhead buffer.
 const h = vi.hoisted(() => ({
   readyWaitMs: 0,
   readyTimeoutMs: 0,
@@ -51,12 +52,12 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-async function executeOnFreshLease(leaseId: string, config: Record<string, unknown> = {}) {
+async function executeOnFreshLease(leaseId: string) {
   return plugin.definition.onEnvironmentExecute!({
     driverKey: "kubernetes",
     companyId: "acme",
     environmentId: "env-1",
-    config: { inCluster: true, backend: "sandbox-cr", ...config },
+    config: { inCluster: true, backend: "sandbox-cr" },
     lease: { providerLeaseId: leaseId, metadata: { namespace: "paperclip-acme", backend: "sandbox-cr" } },
     command: "sh",
     args: ["-c", "git rev-parse --show-toplevel"],
@@ -64,7 +65,7 @@ async function executeOnFreshLease(leaseId: string, config: Record<string, unkno
   } as never);
 }
 
-describe("onEnvironmentExecute readiness budget", () => {
+describe("onEnvironmentExecute readiness grace", () => {
   it("gives the command its full timeout after a slow pod start", async () => {
     h.readyWaitMs = 16_000;
     const result = await executeOnFreshLease("pc-slow-pull");
@@ -72,11 +73,15 @@ describe("onEnvironmentExecute readiness budget", () => {
     expect(h.execTimeoutMs).toBe(15_000);
   });
 
-  it("waits for readiness up to podReadyTimeoutSec, not the command timeout", async () => {
+  it("bounds readiness by the command timeout plus a grace under the server's 30 s buffer", async () => {
     h.readyWaitMs = 0;
-    await executeOnFreshLease("pc-default-budget");
-    expect(h.readyTimeoutMs).toBe(180_000);
-    await executeOnFreshLease("pc-custom-budget", { podReadyTimeoutSec: 60 });
-    expect(h.readyTimeoutMs).toBe(60_000);
+    await executeOnFreshLease("pc-bounded");
+    expect(h.readyTimeoutMs).toBe(15_000 + 25_000);
+  });
+
+  it("shortens the command when readiness overran the grace, so the server deadline still holds", async () => {
+    h.readyWaitMs = 30_000;
+    await executeOnFreshLease("pc-very-slow");
+    expect(h.execTimeoutMs).toBe(10_000);
   });
 });

@@ -32,12 +32,6 @@ export const kubernetesProviderConfigSchema = z
 
     jobTtlSecondsAfterFinished: z.number().int().nonnegative().default(900),
     podActivityDeadlineSec: z.number().int().positive().default(3600),
-    /**
-     * How long the first command on a fresh sandbox-cr lease may wait for the
-     * pod to become Ready (image pull, scheduling). Separate from the command's
-     * own timeout, so a slow pull cannot eat a short command budget.
-     */
-    podReadyTimeoutSec: z.number().int().positive().default(180),
 
     /**
      * The adapter type that Jobs in this environment will run.
