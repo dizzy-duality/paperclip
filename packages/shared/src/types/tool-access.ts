@@ -246,6 +246,7 @@ export interface ConnectionGrant {
       userId: string;
       login: string;
       avatarUrl?: string;
+      credentialKind?: "personal_access_token";
       installationCount: number;
       repositoryCount: number;
       repositorySelection: "all" | "selected" | "mixed" | "none";

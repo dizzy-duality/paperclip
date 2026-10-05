@@ -118,6 +118,8 @@ const support = await getEmbeddedPostgresTestSupport();
       input: Awaited<ReturnType<typeof seed>>,
       user: string,
       dedicated = false,
+      pat = false,
+      subjectAgentId = input.agentId,
     ) {
       const applicationId = randomUUID(),
         connectionId = randomUUID(),
@@ -170,7 +172,7 @@ const support = await getEmbeddedPostgresTestSupport();
         connectionId,
         kind: dedicated ? "agent" : "user",
         subjectUserId: dedicated ? null : user,
-        subjectAgentId: dedicated ? input.agentId : null,
+        subjectAgentId: dedicated ? subjectAgentId : null,
         status: "active",
         credentialSecretRefs: [
           {
@@ -180,15 +182,27 @@ const support = await getEmbeddedPostgresTestSupport();
           },
         ],
         providerTenant: {
-          github: {
-            userId: user,
-            login: user,
-            installationCount: 1,
-            repositoryCount: 1,
-            repositorySelection: "selected",
-            installationIds: ["1"],
-            installationOwnerLogins: [user],
-          },
+          github: pat
+            ? {
+                // A personal access token: no GitHub App installations.
+                userId: user,
+                login: user,
+                credentialKind: "personal_access_token",
+                installationCount: 0,
+                repositoryCount: 1,
+                repositorySelection: "selected",
+                installationIds: [],
+                installationOwnerLogins: [],
+              }
+            : {
+                userId: user,
+                login: user,
+                installationCount: 1,
+                repositoryCount: 1,
+                repositorySelection: "selected",
+                installationIds: ["1"],
+                installationOwnerLogins: [user],
+              },
         },
       });
       return { id, connectionId, secretId, definitionId };
@@ -731,6 +745,41 @@ const support = await getEmbeddedPostgresTestSupport();
         reason: expect.stringContaining("low-trust"),
       });
       expect(vault.resolveUserSecretValue).not.toHaveBeenCalled();
+    });
+    it("resolves a dedicated PAT grant for its agent on an ownerless company_default run", async () => {
+      const input = await seed();
+      const robot = await grant(input, "robot", true, true);
+      await ownerless(input);
+      const result = await resolveGitHubOperationCredentials(db, input);
+      expect(result).toMatchObject({
+        status: "available",
+        source: "dedicated",
+        grantId: robot.id,
+      });
+      expect(result.env.GH_TOKEN).toBe("test-dedicated-token");
+    });
+    it("gives a second agent nothing from another agent's dedicated PAT grant", async () => {
+      const input = await seed();
+      const otherAgentId = randomUUID();
+      await db.insert(agents).values({
+        id: otherAgentId, companyId: input.companyId, name: "Other", role: "engineer", adapterType: "codex_local",
+      });
+      await grant(input, "robot", true, true, otherAgentId);
+      await ownerless(input);
+      expect(await resolveGitHubOperationCredentials(db, input)).toMatchObject({
+        status: expect.stringMatching(/unavailable|absent/),
+        env: {},
+      });
+    });
+    it("still refuses two dedicated grants for different GitHub accounts", async () => {
+      const input = await seed();
+      await grant(input, "robot-a", true, true);
+      await grant(input, "robot-b", true, true);
+      const selection = await resolveManagedGitHubIdentitySelection(db, input.companyId, {
+        agentId: input.agentId, responsibleUserId: null, allowStandingDelegation: true,
+      });
+      expect(selection.grant).toBeUndefined();
+      expect(selection.error).toBe("More than one managed GitHub identity matches this run");
     });
     it("does not resolve the company default person's GitHub", async () => {
       const input = await seed();
