@@ -65,6 +65,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 import {
   classifyRisk,
+  loadGitHubPatGrantMetadata,
   normalizeConnectionMethodConfig,
   projectedConnectionHeaders,
   projectConnectionMethodToolInputSchema,
@@ -75,6 +76,7 @@ import { accessService } from "../services/access.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { toolAccessPolicyService } from "../services/tool-access-policy.js";
 import { secretService } from "../services/secrets.js";
+import { resolveManagedGitHubCredential } from "../services/git-credentials.js";
 import {
   canonicalToolArguments,
   signToolArguments,
@@ -321,8 +323,21 @@ function mcpSseResponse(payload: unknown): Response {
   });
 }
 
+// A GitHub personal access token is checked with GitHub at setup
+// (loadGitHubPatGrantMetadata): one account with one repository.
+function githubApiResponse(url: unknown): Response | null {
+  const href = String(url);
+  if (href === "https://api.github.com/user")
+    return Response.json({ id: 1001, login: "octo-pat" });
+  if (href.startsWith("https://api.github.com/user/repos"))
+    return Response.json([{ id: 2001, full_name: "octo-pat/private-repo", private: true }]);
+  return null;
+}
+
 function mockToolsList(tools: unknown[]) {
-  return vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+  return vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+    const github = githubApiResponse(url);
+    if (github) return github;
     const body = JSON.parse(String(init?.body));
     if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
     return mcpHttpResponse({ jsonrpc: "2.0", id: body.id,
@@ -13269,7 +13284,8 @@ describeEmbeddedPostgres("tool access service", () => {
       first.connectionId,
       company.id,
     );
-    fetchMock.mockRejectedValue(new Error("provider unavailable"));
+    // Only the MCP provider fails; GitHub still answers the PAT check.
+    fetchMock.mockImplementation(async (url) => githubApiResponse(url) ?? Promise.reject(new Error("provider unavailable")));
 
     await expect(
       service.connectGalleryApp(
@@ -13327,7 +13343,10 @@ describeEmbeddedPostgres("tool access service", () => {
       actor,
     );
     await service.archiveConnection(first.connectionId, company.id, actor);
-    fetchMock.mockImplementation(async () => {
+    fetchMock.mockImplementation(async (url) => {
+      // GitHub still answers the PAT check; the MCP provider call races and fails.
+      const github = githubApiResponse(url);
+      if (github) return github;
       const [personalGrant] = await db
         .select()
         .from(connectionGrants)
@@ -13416,7 +13435,10 @@ describeEmbeddedPostgres("tool access service", () => {
       actor,
     );
     await service.archiveConnection(first.connectionId, company.id, actor);
-    fetchMock.mockImplementation(async () => {
+    fetchMock.mockImplementation(async (url) => {
+      // GitHub still answers the PAT check; the MCP provider call races and fails.
+      const github = githubApiResponse(url);
+      if (github) return github;
       const concurrentUpdateAt = new Date(Date.now() + 2_000);
       const [connection] = await db
         .select()
@@ -13470,7 +13492,13 @@ describeEmbeddedPostgres("tool access service", () => {
       (grant) => grant.kind === "user",
     );
     expect(personalGrant).toMatchObject({ status: "active" });
-    expect(personalGrant?.credentialSecretRefs).toHaveLength(1);
+    // A GitHub PAT is one secret under two paths: the MCP header field and
+    // oauth.access_token for managed git/gh.
+    expect(personalGrant?.credentialSecretRefs.map((ref) => ref.configPath).sort()).toEqual([
+      "credentials.authorization",
+      "oauth.access_token",
+    ]);
+    expect(new Set(personalGrant?.credentialSecretRefs.map((ref) => ref.secretId)).size).toBe(1);
     const [preservedSecret] = await db
       .select()
       .from(companySecrets)
@@ -13478,6 +13506,105 @@ describeEmbeddedPostgres("tool access service", () => {
         eq(companySecrets.id, personalGrant!.credentialSecretRefs[0]!.secretId),
       );
     expect(preservedSecret.deletedAt).toBeNull();
+  });
+
+  it("connects a GitHub PAT as a dedicated agent identity that managed git can use", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const service = createTestToolAccessService(db);
+    const actor = {
+      actorType: "user" as const,
+      actorId: "local-board",
+      actorSource: "local_implicit" as const,
+    };
+    mockToolsList([{ name: "get_file_contents", annotations: { readOnlyHint: true } }]);
+
+    const connected = await service.connectGalleryApp(
+      company.id,
+      {
+        galleryKey: "github",
+        connectionMethodKey: "mcp-key",
+        grantKind: "agent",
+        subjectAgentId: agent.id,
+        name: "Agent GitHub PAT",
+        credentialValues: { "credentials.authorization": "pat-fixture-not-a-token" },
+      },
+      actor,
+    );
+    const { grants } = await service.listConnectionGrants(connected.connectionId, company.id);
+    const dedicated = grants.find((grant) => grant.kind === "agent");
+    expect(dedicated).toMatchObject({
+      subjectAgentId: agent.id,
+      status: "active",
+      providerTenant: {
+        github: {
+          userId: "1001",
+          login: "octo-pat",
+          credentialKind: "personal_access_token",
+          installationCount: 0,
+          repositoryCount: 1,
+        },
+      },
+    });
+    expect(dedicated!.credentialSecretRefs.map((ref) => ref.configPath).sort()).toEqual([
+      "credentials.authorization",
+      "oauth.access_token",
+    ]);
+    expect(grants.some((grant) => grant.kind === "organization")).toBe(false);
+    // The wizard's last step: choose access, which activates the connection.
+    await service.finishGalleryAppConnection(company.id, connected.connectionId, {
+      enabledCatalogEntryIds: connected.actions.readOnly.map((action) => action.catalogEntryId),
+      askFirstCatalogEntryIds: [],
+      access: { agentIds: [agent.id] },
+    });
+    // Installing the app on the agent (the UI's separate install step).
+    await db.insert(toolConnectionInstalls).values({
+      companyId: company.id, connectionId: connected.connectionId, targetType: "agent", targetId: agent.id,
+    }).onConflictDoNothing();
+
+    const resolved = await resolveManagedGitHubCredential(db, secretService(db), company.id, {
+      agentId: agent.id,
+      responsibleUserId: null,
+      allowStandingDelegation: true,
+    });
+    expect(resolved).toMatchObject({ configured: true });
+    expect(resolved.error).toBeUndefined();
+    expect(resolved.credential).toMatchObject({
+      identitySource: "dedicated",
+      token: "pat-fixture-not-a-token",
+      githubIdentity: { userId: "1001", login: "octo-pat" },
+    });
+  });
+
+  it("checks a GitHub PAT's account and repository access through /user/repos", async () => {
+    const respond = (routes: Record<string, () => Response>) =>
+      (async (url: unknown) => {
+        const path = String(url).replace("https://api.github.com", "").split("?")[0]!;
+        const page = new URL(String(url)).searchParams.get("page");
+        const route = routes[page ? `${path}?page=${page}` : path];
+        if (!route) throw new Error(`unexpected fetch ${String(url)}`);
+        return route();
+      }) as unknown as typeof fetch;
+    const user = () => Response.json({ id: 7, login: "pat-owner" });
+    const repo = (id: number) => ({ id, full_name: `pat-owner/repo-${id}` });
+
+    await expect(loadGitHubPatGrantMetadata("x", respond({
+      "/user": user,
+      "/user/repos?page=1": () => new Response(JSON.stringify([repo(1)]), {
+        headers: { link: '<https://api.github.com/user/repos?page=2>; rel="next"' },
+      }),
+      "/user/repos?page=2": () => Response.json([repo(2)]),
+    }))).resolves.toMatchObject({ userId: "7", credentialKind: "personal_access_token", installationCount: 0, repositoryCount: 2 });
+    await expect(loadGitHubPatGrantMetadata("x", respond({
+      "/user": user,
+      "/user/repos?page=1": () => Response.json([]),
+    }))).rejects.toMatchObject({ details: { code: "github_repository_access_required" } });
+    await expect(loadGitHubPatGrantMetadata("x", respond({
+      "/user": () => new Response("{}", { status: 401 }),
+    }))).rejects.toMatchObject({ details: { code: "github_token_invalid" } });
+    await expect(loadGitHubPatGrantMetadata("x", (async () => {
+      throw new Error("offline");
+    }) as unknown as typeof fetch)).rejects.toMatchObject({ status: 502, details: { code: "github_unreachable" } });
   });
 
   it("fails closed when an identity-changing revival cannot roll back", async () => {
@@ -13506,7 +13633,8 @@ describeEmbeddedPostgres("tool access service", () => {
       actor,
     );
     await service.archiveConnection(first.connectionId, company.id, actor);
-    fetchMock.mockRejectedValue(new Error("provider unavailable"));
+    // Only the MCP provider fails; GitHub still answers the PAT check.
+    fetchMock.mockImplementation(async (url) => githubApiResponse(url) ?? Promise.reject(new Error("provider unavailable")));
     const runTransaction = db.transaction.bind(db);
     vi.spyOn(db, "transaction")
       .mockImplementationOnce(runTransaction)
