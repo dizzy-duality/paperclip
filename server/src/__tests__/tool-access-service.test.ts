@@ -13873,6 +13873,56 @@ describeEmbeddedPostgres("tool access service", () => {
     });
   });
 
+  describe("reconnecting a GitHub PAT connection", () => {
+    const actor = { actorType: "user" as const, actorId: "local-board", actorSource: "local_implicit" as const };
+    const paths = (grant: { credentialSecretRefs: Array<{ configPath: string; secretId: string }> } | undefined) =>
+      grant?.credentialSecretRefs.map((ref) => ref.configPath).sort();
+    async function connectPat(grantKind: "user" | "agent") {
+      const company = await createCompany(db);
+      const agent = await createAgent(db, company.id);
+      const service = createTestToolAccessService(db);
+      const fetchMock = mockToolsList([{ name: "get_file_contents", annotations: { readOnlyHint: true } }]);
+      const input = {
+        galleryKey: "github",
+        connectionMethodKey: "mcp-key",
+        grantKind,
+        ...(grantKind === "agent" ? { subjectAgentId: agent.id } : {}),
+        name: `GitHub PAT ${grantKind}`,
+      };
+      const first = await service.connectGalleryApp(company.id, {
+        ...input,
+        credentialValues: { "credentials.authorization": "pat-fixture-one" },
+      }, actor);
+      const grantOf = async () =>
+        (await service.listConnectionGrants(first.connectionId, company.id)).grants.find((grant) => grant.kind === grantKind);
+      return { company, service, fetchMock, input, first, grantOf };
+    }
+
+    it.each(["user", "agent"] as const)("keeps both token paths when a %s PAT is retained", async (grantKind) => {
+      const { company, service, input, first, grantOf } = await connectPat(grantKind);
+      const before = await grantOf();
+      await service.connectGalleryApp(company.id, { ...input, reconnectConnectionId: first.connectionId }, actor);
+      const after = await grantOf();
+      expect(paths(after)).toEqual(["credentials.authorization", "oauth.access_token"]);
+      expect(after?.credentialSecretRefs.map((ref) => ref.secretId)).toEqual(before?.credentialSecretRefs.map((ref) => ref.secretId));
+    });
+
+    it("restores the dedicated grant when a reconnect with a new PAT fails", async () => {
+      const { company, service, fetchMock, input, first, grantOf } = await connectPat("agent");
+      const before = await grantOf();
+      fetchMock.mockImplementation(async (url) => githubApiResponse(url) ?? Promise.reject(new Error("provider unavailable")));
+      await expect(service.connectGalleryApp(company.id, {
+        ...input,
+        reconnectConnectionId: first.connectionId,
+        credentialValues: { "credentials.authorization": "pat-fixture-two" },
+      }, actor)).rejects.toMatchObject({ status: 502 });
+      const after = await grantOf();
+      expect(after?.credentialSecretRefs).toEqual(before?.credentialSecretRefs);
+      const [secret] = await db.select().from(companySecrets).where(eq(companySecrets.id, before!.credentialSecretRefs[0]!.secretId));
+      expect(secret.deletedAt).toBeNull();
+    });
+  });
+
   it("checks a GitHub PAT's account and repository access through /user/repos", async () => {
     const respond = (routes: Record<string, () => Response>) =>
       (async (url: unknown) => {
