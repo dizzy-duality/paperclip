@@ -636,13 +636,59 @@ const support = await getEmbeddedPostgresTestSupport();
       expect(history.github).toMatchObject({ source: "delegated" });
       expect(JSON.stringify(history)).not.toContain("test-token-");
     });
-    it("resolves nothing for an ownerless run when the grant is not delegated", async () => {
+    it("resolves nothing for an ownerless run when the grant is not delegated, and says so", async () => {
       const input = await seed();
-      await grant(input, "A");
+      const owned = await grant(input, "A");
       await ownerless(input);
-      expect(await resolveGitHubOperationCredentials(db, input)).toMatchObject({
+      const result = await resolveGitHubOperationCredentials(db, input);
+      expect(result).toMatchObject({
         status: "unavailable",
         env: {},
+        diagnostic: {
+          state: "grant_not_delegated",
+          eligibleConnections: 1,
+          agentGrants: 0,
+          userGrants: 1,
+          delegationRows: 0,
+          standingDelegation: true,
+          responsibleUserPresent: false,
+          identityCause: "company_default",
+          responsibleUserDropped: "company_default",
+        },
+      });
+      // States and counts only: no token, secret id or grant id.
+      const diagnostic = JSON.stringify(result.diagnostic);
+      for (const value of ["test-token-", owned.secretId, owned.definitionId, owned.id])
+        expect(diagnostic).not.toContain(value);
+    });
+    it("says when the grants belong to another user than the run's", async () => {
+      const input = await seed();
+      await grant(input, "A");
+      await switchTo(input, "B");
+      expect(await resolveGitHubOperationCredentials(db, input)).toMatchObject({
+        status: "unavailable",
+        diagnostic: {
+          state: "grants_belong_to_other_users",
+          userGrants: 1,
+          responsibleUserGrants: 0,
+          responsibleUserPresent: true,
+        },
+      });
+    });
+    it("says when a grant is delegated but standing delegation is not allowed", async () => {
+      const input = await seed();
+      const owned = await grant(input, "A");
+      await delegate(input, owned.id);
+      const selection = await resolveManagedGitHubIdentitySelection(db, input.companyId, {
+        agentId: input.agentId,
+        responsibleUserId: null,
+        allowStandingDelegation: false,
+      });
+      expect(selection.grant).toBeUndefined();
+      expect(selection.diagnostic).toMatchObject({
+        state: "delegation_disabled",
+        delegationRows: 1,
+        standingDelegation: false,
       });
     });
     it("never lends a delegated grant to a run with another responsible user", async () => {
