@@ -8,6 +8,38 @@ import type {
   WakeupRequestStatus,
 } from "../constants.js";
 
+/**
+ * Non-secret explanation of why a run did or did not get a managed GitHub
+ * identity: states and counts only, never tokens or secret ids.
+ */
+export interface GitHubIdentityDiagnostic {
+  state:
+    | "selected"
+    | "ambiguous"
+    | "no_connection"
+    | "no_grants"
+    | "grants_belong_to_other_users"
+    | "grant_not_delegated"
+    | "delegation_disabled";
+  /** GitHub connections installed for the company or this agent. */
+  eligibleConnections: number;
+  /** Agent-kind (dedicated) grants for this agent. */
+  agentGrants: number;
+  /** User-kind grants on the eligible connections, any owner. */
+  userGrants: number;
+  /** User-kind grants owned by the run's responsible user. */
+  responsibleUserGrants: number;
+  /** Standing delegations of eligible user grants to this agent. */
+  delegationRows: number;
+  standingDelegation: boolean;
+  responsibleUserPresent: boolean;
+  /** Run identity cause, added by the credential broker. */
+  identityCause?: string;
+  /** Set when the broker ignored the context's responsible user, and why. */
+  responsibleUserDropped?: "company_default";
+  note?: string;
+}
+
 export interface ProviderTraceDebugRequest {
   providerTrace: "raw";
 }
@@ -175,8 +207,9 @@ export interface HeartbeatRun {
     github: {
       status: "available" | "absent" | "unavailable";
       login?: string;
-      source?: "personal" | "dedicated";
+      source?: "personal" | "dedicated" | "delegated";
       reason?: string;
+      diagnostic?: GitHubIdentityDiagnostic;
       connectionId?: string;
       grantId?: string;
       authenticationMode?: "managed" | "host" | "anonymous";

@@ -21675,7 +21675,7 @@ export function heartbeatService(
         {
           agentId: agent.id,
           responsibleUserId,
-          allowStandingDelegation: false,
+          allowStandingDelegation: true,
         },
       );
       const useHostGitHub =

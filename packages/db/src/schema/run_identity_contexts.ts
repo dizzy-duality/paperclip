@@ -1,3 +1,4 @@
+import type { GitHubIdentityDiagnostic } from "@paperclipai/shared";
 import {
   pgTable,
   uuid,
@@ -32,8 +33,9 @@ export const runIdentityContexts = pgTable(
     github: jsonb("github").$type<{
       status: "available" | "absent" | "unavailable";
       login?: string;
-      source?: "personal" | "dedicated";
+      source?: "personal" | "dedicated" | "delegated";
       reason?: string;
+      diagnostic?: GitHubIdentityDiagnostic;
       connectionId?: string;
       grantId?: string;
       authenticationMode?: "managed" | "host" | "anonymous";

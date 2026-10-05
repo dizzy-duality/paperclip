@@ -23,6 +23,7 @@ import {
   toolConnectionInstalls,
   toolConnections,
   userSecretDefinitions,
+  connectionGrantDelegations,
 } from "@paperclipai/db";
 import { LOW_TRUST_REVIEW_PRESET } from "@paperclipai/shared";
 import {
@@ -593,6 +594,143 @@ const support = await getEmbeddedPostgresTestSupport();
         source: "dedicated",
         env: {},
       });
+    });
+    // Standing delegation: the owner's "delegate to agent" control writes a
+    // connectionGrantDelegations row. An ownerless run (timer, retry or
+    // blocker-resolved wake, recorded as cause company_default) must be able to
+    // use exactly the grants delegated to its agent, and nothing else.
+    async function ownerless(input: Awaited<ReturnType<typeof seed>>) {
+      await db
+        .update(runIdentityContexts)
+        .set({ cause: "company_default", responsibleUserId: null })
+        .where(eq(runIdentityContexts.runId, input.runId));
+    }
+    async function delegate(
+      input: Awaited<ReturnType<typeof seed>>,
+      grantId: string,
+    ) {
+      await db.insert(connectionGrantDelegations).values({
+        companyId: input.companyId,
+        grantId,
+        agentId: input.agentId,
+        createdByUserId: "A",
+      });
+    }
+    it("resolves a grant delegated to the agent for an ownerless run, reported as delegated", async () => {
+      const input = await seed();
+      const owned = await grant(input, "A");
+      await delegate(input, owned.id);
+      await ownerless(input);
+      const result = await resolveGitHubOperationCredentials(db, input);
+      expect(result).toMatchObject({
+        status: "available",
+        source: "delegated",
+        login: "A",
+        grantId: owned.id,
+      });
+      expect(result.env.GH_TOKEN).toBe("test-token-A");
+      const [history] = await db
+        .select()
+        .from(runIdentityContexts)
+        .where(eq(runIdentityContexts.runId, input.runId));
+      expect(history.github).toMatchObject({ source: "delegated" });
+      expect(JSON.stringify(history)).not.toContain("test-token-");
+    });
+    it("resolves nothing for an ownerless run when the grant is not delegated, and says so", async () => {
+      const input = await seed();
+      const owned = await grant(input, "A");
+      await ownerless(input);
+      const result = await resolveGitHubOperationCredentials(db, input);
+      expect(result).toMatchObject({
+        status: "unavailable",
+        env: {},
+        diagnostic: {
+          state: "grant_not_delegated",
+          eligibleConnections: 1,
+          agentGrants: 0,
+          userGrants: 1,
+          delegationRows: 0,
+          standingDelegation: true,
+          responsibleUserPresent: false,
+          identityCause: "company_default",
+          responsibleUserDropped: "company_default",
+        },
+      });
+      // States and counts only: no token, secret id or grant id.
+      const diagnostic = JSON.stringify(result.diagnostic);
+      for (const value of ["test-token-", owned.secretId, owned.definitionId, owned.id])
+        expect(diagnostic).not.toContain(value);
+    });
+    it("says when the grants belong to another user than the run's", async () => {
+      const input = await seed();
+      await grant(input, "A");
+      await switchTo(input, "B");
+      expect(await resolveGitHubOperationCredentials(db, input)).toMatchObject({
+        status: "unavailable",
+        diagnostic: {
+          state: "grants_belong_to_other_users",
+          userGrants: 1,
+          responsibleUserGrants: 0,
+          responsibleUserPresent: true,
+        },
+      });
+    });
+    it("says when a grant is delegated but standing delegation is not allowed", async () => {
+      const input = await seed();
+      const owned = await grant(input, "A");
+      await delegate(input, owned.id);
+      const selection = await resolveManagedGitHubIdentitySelection(db, input.companyId, {
+        agentId: input.agentId,
+        responsibleUserId: null,
+        allowStandingDelegation: false,
+      });
+      expect(selection.grant).toBeUndefined();
+      expect(selection.diagnostic).toMatchObject({
+        state: "delegation_disabled",
+        delegationRows: 1,
+        standingDelegation: false,
+      });
+    });
+    it("never lends a delegated grant to a run with another responsible user", async () => {
+      const input = await seed();
+      const owned = await grant(input, "A");
+      await delegate(input, owned.id);
+      await switchTo(input, "B");
+      expect(await resolveGitHubOperationCredentials(db, input)).toMatchObject({
+        status: "unavailable",
+        env: {},
+      });
+    });
+    it("still denies a delegated grant to a low-trust run", async () => {
+      const input = await seed();
+      const owned = await grant(input, "A");
+      await delegate(input, owned.id);
+      await ownerless(input);
+      await db
+        .update(issues)
+        .set({
+          executionPolicy: {
+            authorizationPolicy: {
+              trustPreset: LOW_TRUST_REVIEW_PRESET,
+              trustBoundary: {
+                mode: LOW_TRUST_REVIEW_PRESET,
+                companyId: input.companyId,
+                rootIssueId: input.issueId,
+                issueIds: [input.issueId],
+                allowedAgentIds: [input.agentId],
+                allowedToolClasses: ["git.read", "github.pr.read"],
+              },
+            },
+          },
+        })
+        .where(eq(issues.id, input.issueId));
+      vault.resolveUserSecretValue.mockClear();
+      expect(await resolveGitHubOperationCredentials(db, input)).toMatchObject({
+        status: "unavailable",
+        env: {},
+        reason: expect.stringContaining("low-trust"),
+      });
+      expect(vault.resolveUserSecretValue).not.toHaveBeenCalled();
     });
     it("does not resolve the company default person's GitHub", async () => {
       const input = await seed();
