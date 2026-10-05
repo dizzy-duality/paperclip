@@ -13,7 +13,7 @@ import { githubChatReviewService } from "./chat-github-reviews.js";
 import { runIdentityContexts } from "@paperclipai/db";
 import { captureRunIdentity } from "./run-identity.js";
 import { emitConnectionInvoked } from "./connector-telemetry.js";
-import { resolveManagedGitHubIdentitySelection } from "./git-credentials.js";
+import { githubGrantIdentitySource, resolveManagedGitHubIdentitySelection } from "./git-credentials.js";
 import { extractRemoteMcpPending } from "./remote-mcp-pending.js";
 import { logger } from "../middleware/logger.js";
 import { spawn } from "node:child_process";
@@ -3799,6 +3799,20 @@ export function createToolGatewayService(
       session.identityContextId &&
       (connection.config.sourceTemplateKey === "github" ||
         connection.transportConfig?.sourceTemplateKey === "github");
+    // Report a delegated member grant as delegated, not personal.
+    const source = githubGrantIdentitySource(grant, session.responsibleUserId);
+    // Keep the credential broker's diagnostic instead of erasing it.
+    const recordGitHub = async (summary: NonNullable<typeof runIdentityContexts.$inferSelect["github"]>) => {
+      const where = and(
+        eq(runIdentityContexts.id, session.identityContextId!),
+        eq(runIdentityContexts.companyId, session.companyId),
+      );
+      const [current] = await db.select({ github: runIdentityContexts.github }).from(runIdentityContexts).where(where);
+      await db
+        .update(runIdentityContexts)
+        .set({ github: { ...summary, ...(current?.github?.diagnostic ? { diagnostic: current.github.diagnostic } : {}) } })
+        .where(where);
+    };
     try {
       const captured = githubOperationCredentials.get(session);
       const headers =
@@ -3811,42 +3825,22 @@ export function createToolGatewayService(
               resolveOptions,
             );
       if (tracked)
-        await db
-          .update(runIdentityContexts)
-          .set({
-            github: {
-              status: "available",
-              login: grant.providerTenant?.github?.login,
-              source: grant.kind === "agent" ? "dedicated" : "personal",
-              connectionId: connection.id,
-              grantId: grant.id,
-              authenticationMode: "managed",
-            },
-          })
-          .where(
-            and(
-              eq(runIdentityContexts.id, session.identityContextId!),
-              eq(runIdentityContexts.companyId, session.companyId),
-            ),
-          );
+        await recordGitHub({
+          status: "available",
+          login: grant.providerTenant?.github?.login,
+          source,
+          connectionId: connection.id,
+          grantId: grant.id,
+          authenticationMode: "managed",
+        });
       return headers;
     } catch (error) {
       if (tracked)
-        await db
-          .update(runIdentityContexts)
-          .set({
-            github: {
-              status: "unavailable",
-              reason: "GitHub authorization is unavailable",
-              source: grant.kind === "agent" ? "dedicated" : "personal",
-            },
-          })
-          .where(
-            and(
-              eq(runIdentityContexts.id, session.identityContextId!),
-              eq(runIdentityContexts.companyId, session.companyId),
-            ),
-          );
+        await recordGitHub({
+          status: "unavailable",
+          reason: "GitHub authorization is unavailable",
+          source,
+        });
       throw error;
     }
   }
