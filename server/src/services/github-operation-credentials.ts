@@ -20,7 +20,7 @@ import { isLowTrustQuarantined } from "./source-trust.js";
 
 export type GitHubCredentialSummary = {
   status: "available" | "absent" | "unavailable";
-  source?: "personal" | "dedicated";
+  source?: "personal" | "dedicated" | "delegated";
   login?: string;
   reason?: string;
   connectionId?: string;
@@ -145,7 +145,7 @@ export async function resolveGitHubOperationCredentials(
       {
         agentId: input.agentId,
         heartbeatRunId: input.runId,
-        allowStandingDelegation: false,
+        allowStandingDelegation: true,
         responsibleUserId:
           context?.cause === "company_default"
             ? null
