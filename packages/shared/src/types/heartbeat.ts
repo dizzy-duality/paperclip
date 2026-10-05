@@ -175,7 +175,7 @@ export interface HeartbeatRun {
     github: {
       status: "available" | "absent" | "unavailable";
       login?: string;
-      source?: "personal" | "dedicated";
+      source?: "personal" | "dedicated" | "delegated";
       reason?: string;
       connectionId?: string;
       grantId?: string;

@@ -50,7 +50,7 @@ export type GitCredential = {
   /** The company-secret name the token came from; null for a server-environment token. */
   secretName: string | null;
   githubIdentity?: { userId: string; login: string };
-  identitySource?: "personal" | "dedicated";
+  identitySource?: "personal" | "dedicated" | "delegated";
   connectionId?: string;
   grantId?: string;
 };
@@ -304,7 +304,7 @@ export async function resolveManagedGitHubIdentitySelection(
   },
 ): Promise<{
   configured: boolean;
-  identitySource?: "personal" | "dedicated";
+  identitySource?: "personal" | "dedicated" | "delegated";
   grant?: typeof connectionGrants.$inferSelect;
   error?: string;
 }> {
@@ -361,7 +361,12 @@ export async function resolveManagedGitHubIdentitySelection(
       })
     : [];
   const candidates = dedicated.length > 0 ? dedicated : personal.length > 0 ? personal : delegated;
-  const identitySource = dedicated.length > 0 ? "dedicated" as const : "personal" as const;
+  // A delegated credential is reported as such, never as "personal": the run
+  // acts with a member's grant under that member's standing consent for this
+  // agent, not on that member's behalf.
+  const identitySource = dedicated.length > 0
+    ? "dedicated" as const
+    : personal.length === 0 && delegated.length > 0 ? "delegated" as const : "personal" as const;
   // Reconnecting can create another connection/grant for the same GitHub
   // account. Ambiguity is about provider identities, not the number of rows.
   // Only trust GitHub's stable account ID; equal logins or missing metadata
@@ -472,7 +477,7 @@ export async function resolveManagedGitHubCredential(
     agentId?: string | null;
     allowStandingDelegation?: boolean;
   },
-): Promise<{ configured: boolean; identitySource?: "personal" | "dedicated"; credential?: GitCredential; error?: string }> {
+): Promise<{ configured: boolean; identitySource?: "personal" | "dedicated" | "delegated"; credential?: GitCredential; error?: string }> {
   const selection = await resolveManagedGitHubIdentitySelection(db, companyId, context);
   if (!selection.configured) return { configured: false };
   if (!selection.grant) return { configured: true, identitySource: selection.identitySource, error: selection.error };
@@ -551,13 +556,15 @@ export async function resolveManagedGitHubCredential(
         source: "managed_connection" as const,
         secretName: null,
         githubIdentity: { userId: github.userId, login: github.login },
-        identitySource: grant.kind === "agent" ? "dedicated" as const : "personal" as const,
+        // How the grant was selected, not just its kind: a member's user-kind
+        // grant reached through standing delegation is "delegated".
+        identitySource: selection.identitySource ?? (grant.kind === "agent" ? "dedicated" as const : "personal" as const),
         connectionId: grant.connectionId,
         grantId: grant.id,
       },
     };
   };
-  let failure: { configured: boolean; identitySource?: "personal" | "dedicated"; error?: string };
+  let failure: { configured: boolean; identitySource?: "personal" | "dedicated" | "delegated"; error?: string };
   try {
     const result = await acquire(selection);
     if (result.credential) return result;
