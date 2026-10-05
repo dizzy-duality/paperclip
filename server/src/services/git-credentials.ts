@@ -294,6 +294,20 @@ export function createGitRemoteAuthProvider(
   };
 }
 
+/**
+ * How a selected grant relates to a run: an agent-kind grant is dedicated; a
+ * user-kind grant is personal only when it belongs to the run's responsible
+ * user, otherwise it reached the run through standing delegation (the only
+ * path that selects another member's grant, and only for ownerless runs).
+ */
+export function githubGrantIdentitySource(
+  grant: { kind: string; subjectUserId: string | null },
+  responsibleUserId: string | null | undefined,
+): "personal" | "dedicated" | "delegated" {
+  if (grant.kind === "agent") return "dedicated";
+  return grant.subjectUserId === responsibleUserId ? "personal" : "delegated";
+}
+
 export async function resolveManagedGitHubIdentitySelection(
   db: Db,
   companyId: string,
