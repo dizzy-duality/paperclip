@@ -12820,8 +12820,26 @@ export function toolAccessService(
       retainedMethodKey === method?.key &&
       (!remoteMcpConnector || (baseConfig.url === retainedConfig.url && genericAuthKind === retainedConnection.authKind)),
     );
+    // A dedicated agent identity keeps its credential on the agent grant, not
+    // on the connection; reconnecting it without a new value retains that.
+    const [retainedAgentGrant] =
+      canRetainCredentialMaterial && requestedGrantKind === "agent" && retainedConnection && dedicatedAgentId
+        ? await db
+            .select()
+            .from(connectionGrants)
+            .where(
+              and(
+                eq(connectionGrants.companyId, companyId),
+                eq(connectionGrants.connectionId, retainedConnection.id),
+                eq(connectionGrants.kind, "agent"),
+                eq(connectionGrants.subjectAgentId, dedicatedAgentId),
+              ),
+            )
+            .limit(1)
+        : [];
     const retainedCredentialSecretRefs = canRetainCredentialMaterial
       ? (retainedPersonalIdentity?.grant?.credentialSecretRefs ??
+        retainedAgentGrant?.credentialSecretRefs ??
         retainedConnection?.credentialSecretRefs ??
         [])
       : [];
@@ -12919,6 +12937,15 @@ export function toolAccessService(
           credentialFields.some((field) => field.configPath === ref.configPath),
         );
         if (tokenRef) credentialSecretRefs.push({ ...tokenRef, configPath: "oauth.access_token" });
+      } else {
+        // The token was retained (no new value): keep its managed-git path too.
+        const retainedTokenRef = retainedCredentialSecretRefs.find((ref) => ref.configPath === "oauth.access_token");
+        if (
+          retainedTokenRef &&
+          credentialSecretRefs.some((ref) => ref.secretId === retainedTokenRef.secretId) &&
+          !credentialSecretRefs.some((ref) => ref.configPath === "oauth.access_token")
+        )
+          credentialSecretRefs.push(retainedTokenRef);
       }
 
       if (!remoteUrlCredential?.secretUrl && canRetainCredentialMaterial && baseConfig.url === retainedConfig.url) {
@@ -13259,32 +13286,39 @@ export function toolAccessService(
               ),
             )
             .limit(1);
-          if (existingAgentGrant) {
-            await db
-              .update(connectionGrants)
-              .set({
-                credentialSecretRefs,
-                providerTenant: { ...(existingAgentGrant.providerTenant ?? {}), github: githubPatTenant },
-                status: "active",
-                revokedAt: null,
-                revokedByAgentId: null,
-                revokedByUserId: null,
-                updatedAt: new Date(),
-              })
-              .where(eq(connectionGrants.id, existingAgentGrant.id));
-          } else {
-            await db.insert(connectionGrants).values({
-              companyId,
-              connectionId: connectionRow.id,
-              kind: "agent",
-              subjectAgentId: dedicatedAgentId,
-              credentialSecretRefs,
-              providerTenant: { github: githubPatTenant },
-              status: "active",
-              isDefault: false,
-              createdByUserId: actor?.actorType === "user" ? (actor.actorId ?? null) : null,
-            });
-          }
+          const [changedAgentGrant] = existingAgentGrant
+            ? await db
+                .update(connectionGrants)
+                .set({
+                  credentialSecretRefs,
+                  providerTenant: { ...(existingAgentGrant.providerTenant ?? {}), github: githubPatTenant },
+                  status: "active",
+                  revokedAt: null,
+                  revokedByAgentId: null,
+                  revokedByUserId: null,
+                  updatedAt: new Date(),
+                })
+                .where(eq(connectionGrants.id, existingAgentGrant.id))
+                .returning()
+            : await db
+                .insert(connectionGrants)
+                .values({
+                  companyId,
+                  connectionId: connectionRow.id,
+                  kind: "agent",
+                  subjectAgentId: dedicatedAgentId,
+                  credentialSecretRefs,
+                  providerTenant: { github: githubPatTenant },
+                  status: "active",
+                  isDefault: false,
+                  createdByUserId: actor?.actorType === "user" ? (actor.actorId ?? null) : null,
+                })
+                .returning();
+          // On a reconnect, a later setup failure restores this grant (or
+          // removes it if it is new), as it does for a personal grant: the
+          // failure path deletes the replacement secret it would point at.
+          if (revivedConnectionPrevious && changedAgentGrant)
+            revivedGrantMutation = { previous: existingAgentGrant ?? null, current: changedAgentGrant };
         }
       } else {
         const organizationGrant = await ensureDefaultOrganizationGrant(
