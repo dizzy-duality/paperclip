@@ -163,7 +163,7 @@ export async function prepareHeartbeatExecutionConfiguration(db: Db, input: Hear
       actor: skillActor,
     })),
     time("configuration_github_identity", () => resolveManagedGitHubIdentitySelection(db, agent.companyId, {
-      agentId: agent.id, responsibleUserId, allowStandingDelegation: false,
+      agentId: agent.id, responsibleUserId, allowStandingDelegation: true,
     })),
   ]);
   if (mentionedSkills.status === "rejected") throw mentionedSkills.reason;

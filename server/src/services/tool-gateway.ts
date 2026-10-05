@@ -3028,7 +3028,7 @@ export function createToolGatewayService(
           {
             agentId: session.agentId,
             responsibleUserId: session.responsibleUserId,
-            allowStandingDelegation: false,
+            allowStandingDelegation: true,
           },
         );
         if (!selected.grant)
@@ -3087,7 +3087,7 @@ export function createToolGatewayService(
               {
                 agentId: session.agentId,
                 responsibleUserId: session.responsibleUserId,
-                allowStandingDelegation: false,
+                allowStandingDelegation: true,
                 excludeGrantId: original.id,
               },
             );
@@ -4697,7 +4697,7 @@ export function createToolGatewayService(
         : await resolveManagedGitHubIdentitySelection(db, session.companyId, {
             agentId: session.agentId,
             responsibleUserId: session.responsibleUserId,
-            allowStandingDelegation: false,
+            allowStandingDelegation: true,
           });
       if (!selected.grant || selected.grant.connectionId !== connection.id) {
         throw new ToolGatewayHttpError(
