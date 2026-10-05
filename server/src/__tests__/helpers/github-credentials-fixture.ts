@@ -52,6 +52,8 @@ export function githubCredentialsFixture(getDb: () => Db) {
     input: Awaited<ReturnType<typeof seed>>,
     user: string,
     dedicated = false,
+    pat = false,
+    subjectAgentId = input.agentId,
   ) {
     const db = getDb();
     const applicationId = randomUUID(),
@@ -105,7 +107,7 @@ export function githubCredentialsFixture(getDb: () => Db) {
       connectionId,
       kind: dedicated ? "agent" : "user",
       subjectUserId: dedicated ? null : user,
-      subjectAgentId: dedicated ? input.agentId : null,
+      subjectAgentId: dedicated ? subjectAgentId : null,
       status: "active",
       credentialSecretRefs: [
         {
@@ -115,15 +117,27 @@ export function githubCredentialsFixture(getDb: () => Db) {
         },
       ],
       providerTenant: {
-        github: {
-          userId: user,
-          login: user,
-          installationCount: 1,
-          repositoryCount: 1,
-          repositorySelection: "selected",
-          installationIds: ["1"],
-          installationOwnerLogins: [user],
-        },
+        github: pat
+          ? {
+              // A personal access token: no GitHub App installations.
+              userId: user,
+              login: user,
+              credentialKind: "personal_access_token",
+              installationCount: 0,
+              repositoryCount: 1,
+              repositorySelection: "selected",
+              installationIds: [],
+              installationOwnerLogins: [],
+            }
+          : {
+              userId: user,
+              login: user,
+              installationCount: 1,
+              repositoryCount: 1,
+              repositorySelection: "selected",
+              installationIds: ["1"],
+              installationOwnerLogins: [user],
+            },
       },
     });
     return { id, connectionId, secretId, definitionId };
