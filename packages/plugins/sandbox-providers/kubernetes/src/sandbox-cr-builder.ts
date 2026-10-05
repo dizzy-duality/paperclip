@@ -30,6 +30,7 @@ export interface BuildSandboxCrManifestInput {
   };
   runtimeClassName?: string;
   imagePullSecrets?: string[];
+  nodeSelector?: Record<string, string>;
 }
 
 export function buildSandboxCrManifest(
@@ -72,6 +73,9 @@ export function buildSandboxCrManifest(
                   name,
                 })),
               }
+            : {}),
+          ...(input.nodeSelector && Object.keys(input.nodeSelector).length > 0
+            ? { nodeSelector: { ...input.nodeSelector } }
             : {}),
           securityContext: {
             runAsNonRoot: true,

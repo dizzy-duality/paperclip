@@ -14,6 +14,7 @@ export interface BuildJobManifestInput {
   activeDeadlineSec: number;
   ttlSecondsAfterFinished: number;
   imagePullSecrets?: string[];
+  nodeSelector?: Record<string, string>;
 }
 
 export function buildJobManifest(input: BuildJobManifestInput): Record<string, unknown> {
@@ -45,6 +46,9 @@ export function buildJobManifest(input: BuildJobManifestInput): Record<string, u
           ...(input.runtimeClassName ? { runtimeClassName: input.runtimeClassName } : {}),
           ...(input.imagePullSecrets && input.imagePullSecrets.length > 0
             ? { imagePullSecrets: input.imagePullSecrets.map((name) => ({ name })) }
+            : {}),
+          ...(input.nodeSelector && Object.keys(input.nodeSelector).length > 0
+            ? { nodeSelector: { ...input.nodeSelector } }
             : {}),
           securityContext: {
             runAsNonRoot: true,
