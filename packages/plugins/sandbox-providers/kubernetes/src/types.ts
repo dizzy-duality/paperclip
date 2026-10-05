@@ -15,6 +15,9 @@ export const kubernetesProviderConfigSchema = z
     imageRegistry: z.string().url().optional(),
     imageAllowList: z.array(z.string()).default([]),
     imagePullSecrets: z.array(z.string()).default([]),
+    /** Node labels agent pods must match (PodSpec.nodeSelector), e.g. to keep
+     * them in the server's datacenter. Empty = schedule anywhere. */
+    nodeSelector: z.record(z.string()).default({}),
 
     egressAllowFqdns: z.array(z.string()).default([]),
     egressAllowCidrs: z.array(z.string().regex(cidrRegex, "Invalid CIDR")).default([]),
