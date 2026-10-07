@@ -116,7 +116,7 @@ describeEmbeddedPostgres("cross-issue influence limit PostgreSQL serialization",
     expect(recorded.filter((row) => row.action === "issue.cross_issue_influence_cap_rejected")).toHaveLength(1);
   });
 
-  it("lets a run without a source issue write only to the issue it checked out", async () => {
+  it("lets a run without a source issue write, within the cap, only to the issue it checked out", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const timerRunId = randomUUID();
@@ -144,7 +144,16 @@ describeEmbeddedPostgres("cross-issue influence limit PostgreSQL serialization",
     const attempt = (targetIssueId: string) =>
       observeCrossIssueInfluence(db, { companyId, runId: timerRunId, agentId, targetIssueId, kind: "comment" });
 
-    await expect(attempt(own)).resolves.toBeNull();
+    // Allowed, and counted against the run's cap like any cross-issue write:
+    // checking issues out must not become a way around the cap.
+    await expect(attempt(own)).resolves.toMatchObject({ allowed: true, count: 1 });
+    await db.insert(activityLog).values(Array.from({ length: 19 }, () => ({
+      companyId, actorType: "agent" as const, actorId: agentId, agentId, runId: timerRunId,
+      action: "issue.cross_issue_influence_observed", entityType: "issue", entityId: own,
+    })));
+    await expect(observeCrossIssueInfluence(db, {
+      companyId, runId: timerRunId, agentId, targetIssueId: own, kind: "comment", now: CROSS_ISSUE_INFLUENCE_ENFORCE_AT,
+    })).resolves.toMatchObject({ allowed: false, count: 21 });
     for (const target of [othersCheckout, unchecked]) {
       await expect(attempt(target)).rejects.toMatchObject({
         status: 403,
