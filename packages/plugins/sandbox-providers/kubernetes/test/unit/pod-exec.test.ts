@@ -7,6 +7,8 @@ import type { PassThrough } from "node:stream";
 // the success path, reports an exit status. This exercises the host-side stdout
 // accumulation cap without a real cluster.
 type StatusCb = (status: {
+  reason?: string;
+  message?: string;
   status: string;
   details?: { causes?: { reason?: string; message?: string }[] };
 }) => void;
@@ -234,5 +236,51 @@ describe("execInPodStreaming", () => {
         timeoutMs: 5_000,
       }),
     ).rejects.toThrow(/disk guard/i);
+  });
+});
+
+// A failure status without an ExitCode cause comes from the API server or the
+// kubelet, not the command. Reporting it as a bare exit 1 left runs failing
+// with "could not stage the run environment in the pod:" and nothing after it.
+describe("exec status without an exit code", () => {
+  const refused = (stdout: PassThrough, stderr: PassThrough, statusCb: StatusCb) => {
+    stdout.end();
+    stderr.end();
+    statusCb({ status: "Failure", reason: "InternalError", message: "container not running" });
+  };
+
+  it("execInPod reports the API reason and message on stderr", async () => {
+    scriptedExec = refused;
+    const result = await execInPod(KC, "ns", "pod", "agent", ["/bin/sh", "-c", ":"], undefined, 5_000);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toBe("[kubernetes exec Failure] InternalError: container not running");
+  });
+
+  it("execInPodStreaming reports it after the command's own stderr", async () => {
+    scriptedExec = (stdout, stderr, statusCb) => {
+      stderr.write("partial\n");
+      refused(stdout, stderr, statusCb);
+    };
+    const result = await execInPodStreaming(KC, "ns", "pod", "agent", ["/bin/sh", "-c", ":"], { timeoutMs: 5_000 });
+    expect(result).toEqual({
+      exitCode: 1,
+      stderr: "partial\n[kubernetes exec Failure] InternalError: container not running",
+    });
+  });
+
+  it("keeps a command's own exit code and stderr unchanged", async () => {
+    scriptedExec = (stdout, stderr, statusCb) => {
+      stderr.write("mkdir: cannot create directory");
+      stdout.end();
+      stderr.end();
+      statusCb({
+        status: "Failure",
+        reason: "NonZeroExitCode",
+        message: "command terminated with non-zero exit code",
+        details: { causes: [{ reason: "ExitCode", message: "2" }] },
+      });
+    };
+    const result = await execInPod(KC, "ns", "pod", "agent", ["/bin/sh", "-c", ":"], undefined, 5_000);
+    expect(result).toEqual({ exitCode: 2, stdout: "", stderr: "mkdir: cannot create directory" });
   });
 });

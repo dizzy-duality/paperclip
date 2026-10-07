@@ -112,6 +112,33 @@ export function stageCommandEnv(
   };
 }
 
+/**
+ * Exit code and diagnostic for an exec status frame. A failure that carries no
+ * `ExitCode` cause did not come from the command: the API server or kubelet
+ * refused or broke the exec. Its reason and message are the only account of why,
+ * so they travel with stderr instead of being reported as a silent exit 1.
+ */
+export function execStatusOutcome(status: {
+  status?: string;
+  reason?: string;
+  message?: string;
+  details?: { causes?: { reason?: string; message?: string }[] };
+}): { exitCode: number; apiError: string | null } {
+  if (status.status === "Success") return { exitCode: 0, apiError: null };
+  const exitCodeCause = (status.details?.causes ?? []).find((c) => c.reason === "ExitCode");
+  if (exitCodeCause?.message) return { exitCode: Number(exitCodeCause.message), apiError: null };
+  const detail = [status.reason, status.message].filter(Boolean).join(": ");
+  return {
+    exitCode: 1,
+    apiError: `[kubernetes exec ${status.status ?? "Failure"}] ${detail || "no reason given"}`,
+  };
+}
+
+function withApiError(stderr: string, apiError: string | null): string {
+  if (!apiError) return stderr;
+  return stderr ? `${stderr.replace(/\n?$/, "\n")}${apiError}` : apiError;
+}
+
 export async function execInPod(
   kc: KubeConfig,
   namespace: string,
@@ -175,6 +202,7 @@ export async function execInPod(
       let ws: WebSocketLike | null = null;
       let resolved = false;
       let pendingExitCode: number | null = null;
+      let pendingApiError: string | null = null;
       let stdoutEnded = false;
       let stderrEnded = false;
 
@@ -211,7 +239,7 @@ export async function execInPod(
         resolved = true;
         if (watchdog) clearTimeout(watchdog);
         try { ws?.close(); } catch { /* ignore */ }
-        resolve({ exitCode: pendingExitCode, stdout: stdoutData, stderr: stderrData });
+        resolve({ exitCode: pendingExitCode, stdout: stdoutData, stderr: withApiError(stderrData, pendingApiError) });
       };
 
       // Fail the whole exec closed, tearing down the WebSocket so the pod stops
@@ -283,18 +311,9 @@ export async function execInPod(
         stdinStream,
         false, // tty=false: keep stdout/stderr on separate channels
         (status) => {
-          if (status.status === "Success") {
-            pendingExitCode = 0;
-          } else {
-            const causes = status.details?.causes ?? [];
-            const exitCodeCause = causes.find(
-              (c: { reason?: string; message?: string }) =>
-                c.reason === "ExitCode",
-            );
-            pendingExitCode = exitCodeCause?.message
-              ? Number(exitCodeCause.message)
-              : 1;
-          }
+          const outcome = execStatusOutcome(status);
+          pendingExitCode = outcome.exitCode;
+          pendingApiError = outcome.apiError;
           tryFinish();
         },
       );
@@ -378,6 +397,7 @@ export async function execInPodStreaming(
     let ws: WebSocketLike | null = null;
     let resolved = false;
     let pendingExitCode: number | null = null;
+    let pendingApiError: string | null = null;
     let stdoutDone = false;
     let stderrEnded = false;
 
@@ -400,7 +420,7 @@ export async function execInPodStreaming(
       resolved = true;
       if (watchdog) clearTimeout(watchdog);
       try { ws?.close(); } catch { /* ignore */ }
-      resolve({ exitCode: pendingExitCode, stderr: stderrData });
+      resolve({ exitCode: pendingExitCode, stderr: withApiError(stderrData, pendingApiError) });
     };
 
     // Fail the whole exec closed, tearing down the WebSocket so the pod stops
@@ -464,15 +484,9 @@ export async function execInPodStreaming(
       stdinStream,
       false, // tty=false: keep stdout/stderr on separate channels
       (status) => {
-        if (status.status === "Success") {
-          pendingExitCode = 0;
-        } else {
-          const causes = status.details?.causes ?? [];
-          const exitCodeCause = causes.find(
-            (c: { reason?: string; message?: string }) => c.reason === "ExitCode",
-          );
-          pendingExitCode = exitCodeCause?.message ? Number(exitCodeCause.message) : 1;
-        }
+        const outcome = execStatusOutcome(status);
+        pendingExitCode = outcome.exitCode;
+        pendingApiError = outcome.apiError;
         tryFinish();
       },
     );
