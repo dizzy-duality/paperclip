@@ -10,7 +10,7 @@ vi.mock("../../src/kube-client.js", () => ({
   makeKubeClients: vi.fn(() => h.clients),
 }));
 
-import plugin from "../../src/plugin.js";
+import plugin, { WORKSPACE_DIR } from "../../src/plugin.js";
 
 // A Kubernetes API where every call succeeds and every object exists and is Ready.
 function permissiveClient(): unknown {
@@ -29,13 +29,18 @@ beforeEach(() => {
 const base = { driverKey: "kubernetes", companyId: "acme", environmentId: "env-1" };
 
 describe("lease remoteCwd", () => {
+  // Git refuses a worktree whose top level is the root-owned emptyDir mount.
+  it("is a directory inside the workspace mount, never the mount itself", () => {
+    expect(WORKSPACE_DIR.startsWith("/workspace/")).toBe(true);
+  });
+
   it("is set on a freshly acquired sandbox-cr lease", async () => {
     const lease = await plugin.definition.onEnvironmentAcquireLease!({
       ...base,
       config: { inCluster: true, backend: "sandbox-cr" },
       runId: "run-1",
     } as never);
-    expect(lease.metadata?.remoteCwd).toBe("/workspace");
+    expect(lease.metadata?.remoteCwd).toBe("/workspace/run");
   });
 
   it("falls back to the workspace mount on resume when none was recorded", async () => {
@@ -45,7 +50,7 @@ describe("lease remoteCwd", () => {
       providerLeaseId: "pc-abc",
       leaseMetadata: { namespace: "paperclip-acme", jobName: "pc-abc", podName: "pc-pod", backend: "sandbox-cr" },
     });
-    expect(lease.metadata?.remoteCwd).toBe("/workspace");
+    expect(lease.metadata?.remoteCwd).toBe("/workspace/run");
   });
 
   it("keeps a root recorded earlier when the lease is resumed", async () => {

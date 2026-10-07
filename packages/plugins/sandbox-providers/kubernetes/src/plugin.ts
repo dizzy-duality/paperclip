@@ -127,7 +127,14 @@ const RESUME_READY_POLL_MS = 1_000;
 const READY_GRACE_MS = 25_000;
 
 // The agent pod's workspace mount (see pod-spec-builder / sandbox-cr-builder).
-const WORKSPACE_DIR = "/workspace";
+// The agent's working directory is a subdirectory of the /workspace emptyDir,
+// not the mount itself: Kubernetes creates an emptyDir root as root:fsGroup
+// (2777), and Git refuses a worktree whose top level another user owns
+// ("detected dubious ownership"). Runtime git has no global or system config
+// to add a safe.directory exception to, so the directory must be the run
+// user's own. The server creates it in the pod (mkdir -p, as uid 1000) before
+// syncing the workspace.
+export const WORKSPACE_DIR = "/workspace/run";
 
 // The workspace remote dir is the confinement root for native file sync. The
 // lease carries it as `remoteCwd` from acquire/resume onward: the server reads
@@ -576,8 +583,8 @@ const plugin = definePlugin({
     params: PluginEnvironmentRealizeWorkspaceParams,
   ): Promise<PluginEnvironmentRealizeWorkspaceResult> {
     // The agent pod already has /workspace mounted as an emptyDir at pod
-    // scheduling time (see pod-spec-builder). Nothing to provision here —
-    // we just hand back the cwd. Honor a caller-supplied remotePath if set.
+    // scheduling time (see pod-spec-builder); the server creates WORKSPACE_DIR
+    // inside it. Nothing to provision here — we just hand back the cwd. Honor a caller-supplied remotePath if set.
     const cwd =
       params.workspace.remotePath && params.workspace.remotePath.trim().length > 0
         ? params.workspace.remotePath.trim()
