@@ -1,6 +1,6 @@
 import { and, count, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { activityLog, heartbeatRuns } from "@paperclipai/db";
+import { activityLog, heartbeatRuns, issues } from "@paperclipai/db";
 import { isUuidLike, issueWriteDenialResponse } from "@paperclipai/shared";
 import { forbidden } from "../errors.js";
 import { logger } from "../middleware/logger.js";
@@ -110,7 +110,17 @@ export async function observeCrossIssueInfluence(
     }
 
     const sourceIssueId = readRunSourceIssueId(run.contextSnapshot);
-    if (!sourceIssueId) throw crossIssueInfluenceRunContextError();
+    if (!sourceIssueId) {
+      // A run not started for an issue (a timer heartbeat) has no source issue.
+      // The issue it checked out itself is its own work, not cross-issue
+      // influence; anything else stays uncontainable and is refused.
+      const [target] = await tx
+        .select({ checkoutRunId: issues.checkoutRunId })
+        .from(issues)
+        .where(and(eq(issues.id, input.targetIssueId), eq(issues.companyId, input.companyId)));
+      if (target?.checkoutRunId === input.runId) return null;
+      throw crossIssueInfluenceRunContextError();
+    }
     if (
       sourceIssueId === input.targetIssueId ||
       (input.targetIssueIdentifier && sourceIssueId.toUpperCase() === input.targetIssueIdentifier.toUpperCase())
