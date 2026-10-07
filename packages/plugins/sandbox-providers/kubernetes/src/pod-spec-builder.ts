@@ -1,3 +1,4 @@
+import { CONTAINER_MIN_RESOURCES } from "./tenant-orchestrator.js";
 // The agent's working directory: a subdirectory of the /workspace emptyDir,
 // not the mount itself. Kubernetes creates an emptyDir root as root:fsGroup
 // (2777), and Git refuses a worktree whose top level another user owns
@@ -22,7 +23,8 @@ export function workspaceInitContainer(image: string): Record<string, unknown> {
       allowPrivilegeEscalation: false,
       capabilities: { drop: ["ALL"] },
     },
-    resources: { requests: { cpu: "10m", memory: "16Mi" }, limits: { cpu: "100m", memory: "64Mi" } },
+    // The tenant LimitRange minimum is also the most this one mkdir needs.
+    resources: { requests: { ...CONTAINER_MIN_RESOURCES }, limits: { ...CONTAINER_MIN_RESOURCES } },
     volumeMounts: [{ name: "workspace", mountPath: "/workspace" }],
   };
 }
