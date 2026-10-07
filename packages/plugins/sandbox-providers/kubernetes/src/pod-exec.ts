@@ -139,6 +139,64 @@ function withApiError(stderr: string, apiError: string | null): string {
   return stderr ? `${stderr.replace(/\n?$/, "\n")}${apiError}` : apiError;
 }
 
+/**
+ * The exec WebSocket never opened, so no command started in the pod. The
+ * Kubernetes client rejects with a WebSocket ErrorEvent rather than an Error
+ * here; its text is carried as the message instead of "[object Object]".
+ */
+export class ExecSetupError extends Error {
+  constructor(cause: unknown) {
+    super(`kubernetes exec could not be opened: ${describeExecError(cause)}`);
+    this.name = "ExecSetupError";
+  }
+}
+
+export function describeExecError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (err && typeof err === "object") {
+    const { message, error } = err as { message?: unknown; error?: unknown };
+    const inner = error instanceof Error ? error.message : null;
+    const outer = typeof message === "string" && message ? message : null;
+    if (outer && inner && inner !== outer) return `${outer} (${inner})`;
+    if (outer || inner) return (outer ?? inner) as string;
+  }
+  return String(err);
+}
+
+export type PodExecResult = {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  /** Set when the API server or kubelet failed the exec without an exit code. */
+  apiFailure?: true;
+};
+
+const SETUP_RETRY_DELAYS_MS = [500, 1500];
+
+/**
+ * Re-run an exec whose WebSocket never opened (no command started). With
+ * `retryApiFailure`, also re-run one the API server failed without an exit
+ * code: only for commands that are safe to run twice. Every attempt must still
+ * fit the caller's remaining budget.
+ */
+export async function retryExecSetup(
+  run: () => Promise<PodExecResult>,
+  opts: { retryApiFailure: boolean; remainingMs: () => number; delaysMs?: number[] },
+): Promise<PodExecResult> {
+  const delays = opts.delaysMs ?? SETUP_RETRY_DELAYS_MS;
+  for (let attempt = 0; ; attempt++) {
+    const delay = delays[attempt];
+    const canRetry = () => delay !== undefined && opts.remainingMs() > delay;
+    try {
+      const result = await run();
+      if (!(opts.retryApiFailure && result.apiFailure && canRetry())) return result;
+    } catch (err) {
+      if (!(err instanceof ExecSetupError && canRetry())) throw err;
+    }
+    await new Promise((resolve) => setTimeout(resolve, delay));
+  }
+}
+
 export async function execInPod(
   kc: KubeConfig,
   namespace: string,
@@ -164,7 +222,7 @@ export async function execInPod(
   // fails closed at the cap; regardless of the cap, the `+=` is guarded so a
   // max-string-length `RangeError` can never escape as an uncaught exception.
   maxStderrBytes?: number,
-): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+): Promise<PodExecResult> {
   const exec = new Exec(kc);
   const stdoutStream = new PassThrough();
   const stderrStream = new PassThrough();
@@ -197,7 +255,7 @@ export async function execInPod(
   let stdoutBytes = 0;
   let stderrBytes = 0;
 
-  return await new Promise<{ exitCode: number; stdout: string; stderr: string }>(
+  return await new Promise<PodExecResult>(
     (resolve, reject) => {
       let ws: WebSocketLike | null = null;
       let resolved = false;
@@ -239,7 +297,12 @@ export async function execInPod(
         resolved = true;
         if (watchdog) clearTimeout(watchdog);
         try { ws?.close(); } catch { /* ignore */ }
-        resolve({ exitCode: pendingExitCode, stdout: stdoutData, stderr: withApiError(stderrData, pendingApiError) });
+        resolve({
+          exitCode: pendingExitCode,
+          stdout: stdoutData,
+          stderr: withApiError(stderrData, pendingApiError),
+          ...(pendingApiError ? { apiFailure: true as const } : {}),
+        });
       };
 
       // Fail the whole exec closed, tearing down the WebSocket so the pod stops
@@ -337,7 +400,7 @@ export async function execInPod(
           if (resolved) return;
           resolved = true;
           if (watchdog) clearTimeout(watchdog);
-          reject(err);
+          reject(new ExecSetupError(err));
         });
     },
   );
@@ -510,7 +573,7 @@ export async function execInPodStreaming(
         if (resolved) return;
         resolved = true;
         if (watchdog) clearTimeout(watchdog);
-        reject(err);
+        reject(new ExecSetupError(err));
       });
   });
 }

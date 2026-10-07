@@ -36,7 +36,7 @@ import {
   sandboxCrOrchestrator,
   SandboxCrTimeoutError,
 } from "./sandbox-cr-orchestrator.js";
-import { execInPod, execInPodStreaming, stageCommandEnv } from "./pod-exec.js";
+import { describeExecError, execInPod, execInPodStreaming, retryExecSetup, stageCommandEnv } from "./pod-exec.js";
 import { performSyncIn, performSyncOut, type PodStreamExec } from "./file-sync.js";
 import { checkLeaseResumable, destroyLeaseResources } from "./lease-lifecycle.js";
 import {
@@ -746,6 +746,12 @@ const plugin = definePlugin({
       // server's RPC deadline; 0 means the budget is spent.
       const commandTimeoutMs = () =>
         Math.max(0, Math.min(effectiveTimeoutMs, executeDeadline - Date.now()));
+      // A retry must never start with no budget: execInPod treats 0 as "no limit".
+      const budgetedTimeoutMs = () => {
+        const ms = commandTimeoutMs();
+        if (ms === 0) throw new Error(`execute budget of ${executeBudgetMs}ms spent`);
+        return ms;
+      };
       const budgetSpent = (stage: string) => ({
         exitCode: null,
         timedOut: true,
@@ -879,7 +885,7 @@ const plugin = definePlugin({
               exitCode: null,
               timedOut: true,
               stdout: "",
-              stderr: `fast-upload flush failed: ${err instanceof Error ? err.message : String(err)}`,
+              stderr: `fast-upload flush failed: ${describeExecError(err)}`,
               metadata: {
                 provider: "kubernetes",
                 backend: "sandbox-cr",
@@ -935,14 +941,11 @@ const plugin = definePlugin({
         const stageTimeoutMs = commandTimeoutMs();
         if (stageTimeoutMs === 0) return budgetSpent("staging the run environment");
         try {
-          const stageResult = await execInPod(
-            kc,
-            namespace,
-            podName,
-            "agent",
-            staged.stageCommand,
-            staged.stageStdin,
-            stageTimeoutMs,
+          // Staging writes a fresh uniquely named file, so it is safe to run
+          // again after any failure that did not come from the command itself.
+          const stageResult = await retryExecSetup(
+            () => execInPod(kc, namespace, podName, "agent", staged.stageCommand, staged.stageStdin, budgetedTimeoutMs()),
+            { retryApiFailure: true, remainingMs: commandTimeoutMs },
           );
           if (stageResult.exitCode !== 0) {
             return {
@@ -958,7 +961,7 @@ const plugin = definePlugin({
             exitCode: null,
             timedOut: true,
             stdout: "",
-            stderr: `could not stage the run environment in the pod: ${err instanceof Error ? err.message : String(err)}`,
+            stderr: `could not stage the run environment in the pod: ${describeExecError(err)}`,
             metadata: execMetadata,
           };
         }
@@ -970,14 +973,19 @@ const plugin = definePlugin({
 
       let execResult: { exitCode: number; stdout: string; stderr: string };
       try {
-        execResult = await execInPod(
-          kc,
-          namespace,
-          podName,
-          "agent",
-          execCommand,
-          typeof params.stdin === "string" ? params.stdin : undefined,
-          remainingTimeoutMs,
+        // Only an exec whose WebSocket never opened is re-run: the command
+        // had not started. Any later failure may have run it.
+        execResult = await retryExecSetup(
+          () => execInPod(
+            kc,
+            namespace,
+            podName,
+            "agent",
+            execCommand,
+            typeof params.stdin === "string" ? params.stdin : undefined,
+            budgetedTimeoutMs(),
+          ),
+          { retryApiFailure: false, remainingMs: commandTimeoutMs },
         );
       } catch (err) {
         // Watchdog-fired or WebSocket-setup error. Surface as a timeout so
@@ -986,7 +994,7 @@ const plugin = definePlugin({
           exitCode: null,
           timedOut: true,
           stdout: "",
-          stderr: appendNetworkEgressDenyHint(err instanceof Error ? err.message : String(err), scopedNetworkEgress),
+          stderr: appendNetworkEgressDenyHint(describeExecError(err), scopedNetworkEgress),
           metadata: {
             provider: "kubernetes",
             backend: "sandbox-cr",
