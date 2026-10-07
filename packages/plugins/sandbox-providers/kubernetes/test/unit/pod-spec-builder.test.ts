@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { CONTAINER_MIN_RESOURCES } from "../../src/tenant-orchestrator.js";
 import { WORKSPACE_DIR, buildJobManifest } from "../../src/pod-spec-builder.js";
 
 const baseInput = {
@@ -60,6 +61,10 @@ describe("buildJobManifest", () => {
     expect(init.securityContext).toMatchObject({ runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000 });
     expect(init.volumeMounts).toEqual([{ name: "workspace", mountPath: "/workspace" }]);
     expect(init.image).toBe(spec.containers[0].image);
+    // The tenant LimitRange refuses the whole pod when any container requests
+    // less than its minimum (a 10m/16Mi init container did, on a live cluster).
+    expect(init.resources.requests).toEqual(CONTAINER_MIN_RESOURCES);
+    expect(init.resources.limits).toEqual(CONTAINER_MIN_RESOURCES);
     expect(WORKSPACE_DIR.startsWith("/workspace/")).toBe(true);
   });
 
