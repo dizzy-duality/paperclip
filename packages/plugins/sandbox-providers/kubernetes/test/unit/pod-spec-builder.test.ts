@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildJobManifest } from "../../src/pod-spec-builder.js";
+import { WORKSPACE_DIR, buildJobManifest } from "../../src/pod-spec-builder.js";
 
 const baseInput = {
   namespace: "paperclip-acme",
@@ -48,6 +48,19 @@ describe("buildJobManifest", () => {
     const job = buildJobManifest(baseInput);
     const container = job.spec.template.spec.containers[0];
     expect(container.command).toEqual(["/usr/bin/tini", "--", "/usr/local/bin/paperclip-agent-shim"]);
+  });
+
+  it("creates the agent's working directory as the run user before the agent starts", () => {
+    // Git refuses a worktree in the root-owned emptyDir mount, and the plugin's
+    // file sync and exec need the cwd to exist from the first call.
+    const spec = buildJobManifest(baseInput).spec.template.spec;
+    const [init] = spec.initContainers;
+    expect(spec.initContainers).toHaveLength(1);
+    expect(init.command).toEqual(["/bin/sh", "-c", `mkdir -p ${WORKSPACE_DIR}`]);
+    expect(init.securityContext).toMatchObject({ runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000 });
+    expect(init.volumeMounts).toEqual([{ name: "workspace", mountPath: "/workspace" }]);
+    expect(init.image).toBe(spec.containers[0].image);
+    expect(WORKSPACE_DIR.startsWith("/workspace/")).toBe(true);
   });
 
   it("declares explicit writable emptyDir mounts for the standard agent paths", () => {
