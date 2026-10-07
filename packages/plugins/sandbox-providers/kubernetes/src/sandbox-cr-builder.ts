@@ -1,3 +1,4 @@
+import { workspaceInitContainer } from "./pod-spec-builder.js";
 /**
  * Builds a kubernetes-sigs/agent-sandbox Sandbox CR manifest.
  *
@@ -85,6 +86,7 @@ export function buildSandboxCrManifest(
             fsGroupChangePolicy: "OnRootMismatch",
             seccompProfile: { type: "RuntimeDefault" },
           },
+          initContainers: [workspaceInitContainer(input.image)],
           containers: [
             {
               name: "agent",

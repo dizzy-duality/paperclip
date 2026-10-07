@@ -1,3 +1,32 @@
+// The agent's working directory: a subdirectory of the /workspace emptyDir,
+// not the mount itself. Kubernetes creates an emptyDir root as root:fsGroup
+// (2777), and Git refuses a worktree whose top level another user owns
+// ("detected dubious ownership"); runtime git has no global or system config
+// to hold a safe.directory exception. The init container below creates it as
+// the run user before the agent container starts, so every sync, exec and git
+// command finds a directory the run user owns.
+export const WORKSPACE_DIR = "/workspace/run";
+
+/** Creates {@link WORKSPACE_DIR} as uid 1000 before the agent container runs. */
+export function workspaceInitContainer(image: string): Record<string, unknown> {
+  return {
+    name: "workspace-dir",
+    image,
+    imagePullPolicy: "IfNotPresent",
+    command: ["/bin/sh", "-c", `mkdir -p ${WORKSPACE_DIR}`],
+    securityContext: {
+      runAsNonRoot: true,
+      runAsUser: 1000,
+      runAsGroup: 1000,
+      readOnlyRootFilesystem: true,
+      allowPrivilegeEscalation: false,
+      capabilities: { drop: ["ALL"] },
+    },
+    resources: { requests: { cpu: "10m", memory: "16Mi" }, limits: { cpu: "100m", memory: "64Mi" } },
+    volumeMounts: [{ name: "workspace", mountPath: "/workspace" }],
+  };
+}
+
 export interface BuildJobManifestInput {
   namespace: string;
   jobName: string;
@@ -58,6 +87,7 @@ export function buildJobManifest(input: BuildJobManifestInput): Record<string, u
             fsGroupChangePolicy: "OnRootMismatch",
             seccompProfile: { type: "RuntimeDefault" },
           },
+          initContainers: [workspaceInitContainer(input.image)],
           containers: [
             {
               name: "agent",

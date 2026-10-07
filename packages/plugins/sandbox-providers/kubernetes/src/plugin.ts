@@ -26,7 +26,7 @@ import {
 import { createKubeConfig, makeKubeClients } from "./kube-client.js";
 import { getAdapterDefaults, buildAdapterEnv, resolveRunAdapterType } from "./adapter-defaults.js";
 import { resolveImage } from "./image-allowlist.js";
-import { buildJobManifest } from "./pod-spec-builder.js";
+import { WORKSPACE_DIR, buildJobManifest } from "./pod-spec-builder.js";
 import { buildSandboxCrManifest } from "./sandbox-cr-builder.js";
 import { ensureTenant } from "./tenant-orchestrator.js";
 import { createPerRunSecret } from "./secret-manager.js";
@@ -127,7 +127,7 @@ const RESUME_READY_POLL_MS = 1_000;
 const READY_GRACE_MS = 25_000;
 
 // The agent pod's workspace mount (see pod-spec-builder / sandbox-cr-builder).
-const WORKSPACE_DIR = "/workspace";
+export { WORKSPACE_DIR };
 
 // The workspace remote dir is the confinement root for native file sync. The
 // lease carries it as `remoteCwd` from acquire/resume onward: the server reads
@@ -576,8 +576,8 @@ const plugin = definePlugin({
     params: PluginEnvironmentRealizeWorkspaceParams,
   ): Promise<PluginEnvironmentRealizeWorkspaceResult> {
     // The agent pod already has /workspace mounted as an emptyDir at pod
-    // scheduling time (see pod-spec-builder). Nothing to provision here —
-    // we just hand back the cwd. Honor a caller-supplied remotePath if set.
+    // scheduling time, and its init container creates WORKSPACE_DIR as the run
+    // user (see pod-spec-builder). Nothing to provision here — we just hand back the cwd. Honor a caller-supplied remotePath if set.
     const cwd =
       params.workspace.remotePath && params.workspace.remotePath.trim().length > 0
         ? params.workspace.remotePath.trim()
