@@ -1968,7 +1968,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         quotaHoldUntil !== null && quotaHoldUntil.getTime() > Date.now();
       // Outside the agent's configured active hours, hold automatic runs the
       // same way; resumeQueuedRuns starts them once the window opens.
-      const { activeHours } = parseHeartbeatPolicy(agent);
+      const { activeHours } = policy;
       const offHours =
         activeHours !== null && !isWithinActiveHours(activeHours, new Date());
 
