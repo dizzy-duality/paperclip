@@ -25,7 +25,7 @@ import { assertTaskRetryConversationAllowed, readTaskRetryIntent, readTaskRetryB
 import { insertIssueComment } from "../issue-comment-writes.js";
 import { withExternalAdmissionGuard, assertNoExternalOverlap } from "../../modules/external-agents/index.js";
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
-import { normalizeAgentNameKey } from "./retries.js";
+import { normalizeAgentNameKey, providerQuotaHoldUntil } from "./retries.js";
 import { publishActiveDotComment } from "../dot-assignment-follow-up.js";
 import { publishActiveMuseComment } from "../muse-assignment-follow-up.js";
 import {
@@ -89,6 +89,7 @@ import {
   gt,
   gte,
   inArray,
+  isNotNull,
   isNull,
   lte,
   ne,
@@ -2136,6 +2137,34 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       if (queuedRuns.length === 0) return [];
       if (queuedRuns.every(run => !run.startedAt) && !await canStartNewExternalBotWork(agent)) return [];
 
+      // An agent at its provider's usage limit would only fail again, starting
+      // a sandbox each time. Leave its automatic runs queued (later wakes
+      // coalesce into them) until the limit resets; the periodic
+      // resumeQueuedRuns pass starts them then. A manual run still starts, so
+      // an operator can check whether the limit has lifted.
+      const [latestFinishedRun] = await db
+        .select({
+          errorCode: heartbeatRuns.errorCode,
+          finishedAt: heartbeatRuns.finishedAt,
+          resultJson: sql<Record<string, unknown> | null>`jsonb_build_object(
+            'errorFamily', ${heartbeatRuns.resultJson}->'errorFamily',
+            'retryNotBefore', ${heartbeatRuns.resultJson}->'retryNotBefore',
+            'transientRetryNotBefore', ${heartbeatRuns.resultJson}->'transientRetryNotBefore')`,
+        })
+        .from(heartbeatRuns)
+        .where(
+          and(
+            eq(heartbeatRuns.agentId, agentId),
+            inArray(heartbeatRuns.status, ["succeeded", "failed", "timed_out"]),
+            isNotNull(heartbeatRuns.finishedAt),
+          ),
+        )
+        .orderBy(desc(heartbeatRuns.finishedAt))
+        .limit(1);
+      const quotaHoldUntil = providerQuotaHoldUntil(latestFinishedRun ?? null);
+      const quotaHeld =
+        quotaHoldUntil !== null && quotaHoldUntil.getTime() > Date.now();
+
       const dependencyReadiness = await listQueuedRunDependencyReadiness(
         agent.companyId,
         queuedRuns,
@@ -2210,8 +2239,13 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       });
 
       const claimedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
+      let quotaHeldRuns = 0;
       for (const queuedRun of prioritizedRuns) {
         if (claimedRuns.length >= availableSlots) break;
+        if (quotaHeld && queuedRun.invocationSource !== "on_demand") {
+          quotaHeldRuns += 1;
+          continue;
+        }
         let claimed: typeof heartbeatRuns.$inferSelect | null;
         try {
           claimed = await claimQueuedRun(queuedRun, companyAgents, deferredPostCommitEffects, deferredCancellations);
@@ -2228,6 +2262,12 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           continue;
         }
         if (claimed) claimedRuns.push(claimed);
+      }
+      if (quotaHeldRuns > 0) {
+        logger.info(
+          { agentId, quotaHeldRuns, until: quotaHoldUntil?.toISOString() },
+          "agent is at its provider usage limit; leaving automatic runs queued until it resets",
+        );
       }
       if (claimedRuns.length === 0) return [];
 
