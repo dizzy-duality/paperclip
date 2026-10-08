@@ -10,6 +10,7 @@ import {
   hasConversationContinuationPolicy,
 } from "../conversation-continuation.js";
 import { legacyExecutionNeedsReconciliationWithEvidence } from "../legacy-execution-recovery.js";
+import { PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS } from "../recovery/service.js";
 import {
   executionFailureRetryCount,
   executionRetryAttemptCount,
@@ -262,6 +263,33 @@ function readTransientRetryNotBeforeFromRun(
   }
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+/**
+ * When an agent's latest finished run stopped on its provider's usage limit,
+ * the time until which it should get no new automatic runs: the reset time the
+ * adapter parsed from the provider's message, or else the default quota
+ * backoff after that run (the same wait task recovery uses). Null when the
+ * latest finished run was not a usage-limit stop.
+ */
+export function providerQuotaHoldUntil(
+  latestFinishedRun: Pick<
+    typeof heartbeatRuns.$inferSelect,
+    "errorCode" | "resultJson" | "finishedAt"
+  > | null,
+): Date | null {
+  if (
+    !latestFinishedRun?.finishedAt ||
+    readHeartbeatRunErrorFamily(latestFinishedRun) !== "provider_quota"
+  )
+    return null;
+  return (
+    readTransientRetryNotBeforeFromRun(latestFinishedRun) ??
+    new Date(
+      latestFinishedRun.finishedAt.getTime() +
+        PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS,
+    )
+  );
 }
 
 export function readTransientRecoveryContractFromRun(
