@@ -525,6 +525,7 @@ import {
 import { withRecoveryContext } from "./recovery/status-only-context.js";
 import {
   ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS as RECOVERY_ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS,
+  PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS,
   recoveryService,
 } from "./recovery/service.js";
 import {
@@ -1131,6 +1132,33 @@ function readTransientRetryNotBeforeFromRun(
   }
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+/**
+ * When an agent's latest finished run stopped on its provider's usage limit,
+ * the time until which it should get no new automatic runs: the reset time the
+ * adapter parsed from the provider's message, or else the default quota
+ * backoff after that run (the same wait task recovery uses). Null when the
+ * latest finished run was not a usage-limit stop.
+ */
+export function providerQuotaHoldUntil(
+  latestFinishedRun: Pick<
+    typeof heartbeatRuns.$inferSelect,
+    "errorCode" | "resultJson" | "finishedAt"
+  > | null,
+): Date | null {
+  if (
+    !latestFinishedRun?.finishedAt ||
+    readHeartbeatRunErrorFamily(latestFinishedRun) !== "provider_quota"
+  )
+    return null;
+  return (
+    readTransientRetryNotBeforeFromRun(latestFinishedRun) ??
+    new Date(
+      latestFinishedRun.finishedAt.getTime() +
+        PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS,
+    )
+  );
 }
 
 function readTransientRecoveryContractFromRun(
@@ -19979,6 +20007,34 @@ export function heartbeatService(
         .orderBy(asc(heartbeatRuns.createdAt));
       if (queuedRuns.length === 0) return [];
 
+      // An agent at its provider's usage limit would only fail again, starting
+      // a sandbox each time. Leave its automatic runs queued (later wakes
+      // coalesce into them) until the limit resets; the periodic
+      // resumeQueuedRuns pass starts them then. A manual run still starts, so
+      // an operator can check whether the limit has lifted.
+      const [latestFinishedRun] = await db
+        .select({
+          errorCode: heartbeatRuns.errorCode,
+          finishedAt: heartbeatRuns.finishedAt,
+          resultJson: sql<Record<string, unknown> | null>`jsonb_build_object(
+            'errorFamily', ${heartbeatRuns.resultJson}->'errorFamily',
+            'retryNotBefore', ${heartbeatRuns.resultJson}->'retryNotBefore',
+            'transientRetryNotBefore', ${heartbeatRuns.resultJson}->'transientRetryNotBefore')`,
+        })
+        .from(heartbeatRuns)
+        .where(
+          and(
+            eq(heartbeatRuns.agentId, agentId),
+            inArray(heartbeatRuns.status, ["succeeded", "failed", "timed_out"]),
+            isNotNull(heartbeatRuns.finishedAt),
+          ),
+        )
+        .orderBy(desc(heartbeatRuns.finishedAt))
+        .limit(1);
+      const quotaHoldUntil = providerQuotaHoldUntil(latestFinishedRun ?? null);
+      const quotaHeld =
+        quotaHoldUntil !== null && quotaHoldUntil.getTime() > Date.now();
+
       const dependencyReadiness = await listQueuedRunDependencyReadiness(
         agent.companyId,
         queuedRuns,
@@ -20053,8 +20109,13 @@ export function heartbeatService(
       });
 
       const claimedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
+      let quotaHeldRuns = 0;
       for (const queuedRun of prioritizedRuns) {
         if (claimedRuns.length >= availableSlots) break;
+        if (quotaHeld && queuedRun.invocationSource !== "on_demand") {
+          quotaHeldRuns += 1;
+          continue;
+        }
         let claimed: typeof heartbeatRuns.$inferSelect | null;
         try {
           claimed = await claimQueuedRun(queuedRun, companyAgents);
@@ -20071,6 +20132,12 @@ export function heartbeatService(
           continue;
         }
         if (claimed) claimedRuns.push(claimed);
+      }
+      if (quotaHeldRuns > 0) {
+        logger.info(
+          { agentId, quotaHeldRuns, until: quotaHoldUntil?.toISOString() },
+          "agent is at its provider usage limit; leaving automatic runs queued until it resets",
+        );
       }
       if (claimedRuns.length === 0) return [];
 
