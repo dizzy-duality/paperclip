@@ -194,6 +194,18 @@ describeEmbeddedPostgres("provider quota hold on queued runs", () => {
     expect(await startedAfterResume(runId)).toBe(true);
   });
 
+  it("holds a later automatic retry that inherited an earlier Retry now", async () => {
+    const ids = await insertAgent();
+    await insertFinishedRun(ids, new Date(Date.now() - 60_000), quotaStop(new Date(Date.now() + HOUR_MS)));
+    const runId = await insertQueuedRun(ids);
+    await db.update(heartbeatRuns).set({
+      invocationSource: "automation", scheduledRetryAt: new Date(Date.now() - 60_000),
+      contextSnapshot: { retryNowRequestedAt: new Date(Date.now() - 20 * 60_000).toISOString() },
+    }).where(eq(heartbeatRuns.id, runId));
+
+    expect(await startedAfterResume(runId)).toBe(false);
+  });
+
   it("lifts the hold when a later run finished without hitting the limit", async () => {
     const ids = await insertAgent();
     await insertFinishedRun(ids, new Date(Date.now() - 10 * 60_000), quotaStop(new Date(Date.now() + HOUR_MS)));

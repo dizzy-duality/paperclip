@@ -1137,14 +1137,22 @@ function readTransientRetryNotBeforeFromRun(
 /**
  * Whether an operator asked for this run explicitly: a manual run, or a
  * scheduled retry promoted with "Retry now" (which keeps its automation
- * source). Holds on automatic runs let these through.
+ * source). Holds on automatic runs let these through. Retry now sets
+ * scheduledRetryAt to the request time; later retries copy the context
+ * snapshot, so a stale retryNowRequestedAt no longer matches their own
+ * scheduledRetryAt.
  */
 function isOperatorRequestedRun(
-  run: Pick<typeof heartbeatRuns.$inferSelect, "invocationSource" | "contextSnapshot">,
+  run: Pick<typeof heartbeatRuns.$inferSelect, "invocationSource" | "contextSnapshot" | "scheduledRetryAt">,
 ) {
+  if (run.invocationSource === "on_demand") return true;
+  const retryNowRequestedAt = readNonEmptyString(
+    parseObject(run.contextSnapshot).retryNowRequestedAt,
+  );
   return (
-    run.invocationSource === "on_demand" ||
-    readNonEmptyString(parseObject(run.contextSnapshot).retryNowRequestedAt) !== null
+    retryNowRequestedAt !== null &&
+    run.scheduledRetryAt !== null &&
+    new Date(retryNowRequestedAt).getTime() === run.scheduledRetryAt.getTime()
   );
 }
 
