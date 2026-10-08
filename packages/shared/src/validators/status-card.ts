@@ -1,17 +1,10 @@
 import { z } from "zod";
 import { companySearchQuerySchema } from "./search.js";
+import { ACTIVE_HOURS_TIME_RE, isValidTimeZone } from "../active-hours.js";
 
 export const STATUS_CARD_AGENT_MAX_CARDS = 20;
 export const STATUS_CARD_AGENT_MAX_INTEREST_PROMPT_LENGTH = 4_000;
 
-function isValidTimeZone(timezone: string) {
-  try {
-    new Intl.DateTimeFormat("en", { timeZone: timezone }).format();
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 export const statusCardStateSchema = z.enum(["compiling", "active", "error", "paused_budget", "paused_hours"]);
 export const statusCardUpdateKindSchema = z.enum(["compile", "full", "incremental"]);
@@ -35,8 +28,8 @@ export const statusCardRefreshPolicySchema = z
     triggers: statusCardRefreshTriggersSchema.prefault({}),
     activeHours: z
       .object({
-        start: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
-        end: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+        start: z.string().regex(ACTIVE_HOURS_TIME_RE),
+        end: z.string().regex(ACTIVE_HOURS_TIME_RE),
         timezone: z.string().trim().min(1).refine(isValidTimeZone, { message: "Invalid timezone identifier" }),
       })
       .optional(),

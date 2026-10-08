@@ -69,7 +69,7 @@ import {
   sql,
 } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { AGENT_DEFAULT_MAX_CONCURRENT_RUNS } from "@paperclipai/shared";
+import { AGENT_DEFAULT_MAX_CONCURRENT_RUNS, isWithinActiveHours, parseActiveHours } from "@paperclipai/shared";
 import {
   agents,
   agentWakeupRequests,
@@ -420,6 +420,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           heartbeat.dailySpendCentsLimit ??
           heartbeat.dailyBudgetCents,
       ),
+      activeHours: parseActiveHours(heartbeat.activeHours),
     };
   }
 
@@ -1965,6 +1966,11 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       const quotaHoldUntil = providerQuotaHoldUntil(latestFinishedRun ?? null);
       const quotaHeld =
         quotaHoldUntil !== null && quotaHoldUntil.getTime() > Date.now();
+      // Outside the agent's configured active hours, hold automatic runs the
+      // same way; resumeQueuedRuns starts them once the window opens.
+      const { activeHours } = parseHeartbeatPolicy(agent);
+      const offHours =
+        activeHours !== null && !isWithinActiveHours(activeHours, new Date());
 
       const dependencyReadiness = await listQueuedRunDependencyReadiness(
         agent.companyId,
@@ -2040,11 +2046,11 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       });
 
       const claimedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
-      let quotaHeldRuns = 0;
+      let heldRuns = 0;
       for (const queuedRun of prioritizedRuns) {
         if (claimedRuns.length >= availableSlots) break;
-        if (quotaHeld && !isOperatorRequestedRun(queuedRun)) {
-          quotaHeldRuns += 1;
+        if ((quotaHeld || offHours) && !isOperatorRequestedRun(queuedRun)) {
+          heldRuns += 1;
           continue;
         }
         let claimed: typeof heartbeatRuns.$inferSelect | null;
@@ -2064,10 +2070,16 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         }
         if (claimed) claimedRuns.push(claimed);
       }
-      if (quotaHeldRuns > 0) {
+      if (heldRuns > 0 && quotaHeld) {
         logger.info(
-          { agentId, quotaHeldRuns, until: quotaHoldUntil?.toISOString() },
+          { agentId, heldRuns, until: quotaHoldUntil?.toISOString() },
           "agent is at its provider usage limit; leaving automatic runs queued until it resets",
+        );
+      }
+      if (heldRuns > 0 && offHours) {
+        logger.info(
+          { agentId, heldRuns, activeHours },
+          "agent is outside its active hours; leaving automatic runs queued until they start",
         );
       }
       if (claimedRuns.length === 0) return [];
