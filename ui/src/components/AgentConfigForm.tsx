@@ -19,7 +19,7 @@ import type {
   EnvSecretRefBinding,
   Environment,
 } from "@paperclipai/shared";
-import { AGENT_DEFAULT_MAX_CONCURRENT_RUNS, supportedEnvironmentDriversForAdapter, isValidBrowserCode, ADAPTER_AUTH_MISSING_CHECK_CODE } from "@paperclipai/shared";
+import { AGENT_DEFAULT_MAX_CONCURRENT_RUNS, ACTIVE_HOURS_TIME_RE, parseActiveHours, supportedEnvironmentDriversForAdapter, isValidBrowserCode, ADAPTER_AUTH_MISSING_CHECK_CODE } from "@paperclipai/shared";
 import type { AdapterModel } from "../api/agents";
 import { agentsApi } from "../api/agents";
 import { ApiError } from "../api/client";
@@ -335,6 +335,14 @@ function ConfigSections({ order, className, children }: {
 }
 
 /* ---- Form ---- */
+
+/**
+ * Every IANA zone the browser knows, plus UTC (Chromium leaves it out) and the
+ * current value, so a stored zone is never dropped from the picker.
+ */
+function timeZoneOptions(current: string) {
+  return [...new Set([current, "UTC", ...Intl.supportedValuesOf("timeZone")])];
+}
 
 export function AgentConfigForm(props: AgentConfigFormProps) {
   const { mode, adapterModels: externalModels } = props;
@@ -1345,6 +1353,13 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
     MAX_TURN_CONTINUATION_MAX_DELAY_SEC,
   );
 
+  const activeHours = parseActiveHours(effectiveHeartbeat.activeHours);
+
+  function updateActiveHours(patch: Partial<{ start: string; end: string; timezone: string }>) {
+    if (!activeHours) return;
+    mark("heartbeat", "activeHours", { ...activeHours, ...patch });
+  }
+
   function updateMaxTurnContinuation(patch: Record<string, unknown>) {
     mark("heartbeat", "maxTurnContinuation", {
       ...maxTurnContinuation,
@@ -2056,6 +2071,58 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                   className={inputClass}
                 />
               </Field>
+              <div className="rounded-md border border-border/70 px-3 py-2">
+                <ToggleField
+                  label="Only run during set hours"
+                  hint={help.activeHours}
+                  checked={activeHours !== null}
+                  onChange={(v) =>
+                    mark(
+                      "heartbeat",
+                      "activeHours",
+                      v
+                        ? {
+                            start: "22:00",
+                            end: "06:00",
+                            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                          }
+                        : null,
+                    )}
+                />
+                {activeHours ? (
+                  // Controlled inputs: a value that is not a valid time or zone
+                  // is never stored, so the field snaps back to what Save sends.
+                  <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                    <Field label="From">
+                      <input
+                        type="time"
+                        value={activeHours.start}
+                        onChange={(e) => ACTIVE_HOURS_TIME_RE.test(e.target.value) && updateActiveHours({ start: e.target.value })}
+                        className={inputClass}
+                      />
+                    </Field>
+                    <Field label="Until">
+                      <input
+                        type="time"
+                        value={activeHours.end}
+                        onChange={(e) => ACTIVE_HOURS_TIME_RE.test(e.target.value) && updateActiveHours({ end: e.target.value })}
+                        className={inputClass}
+                      />
+                    </Field>
+                    <Field label="Time zone">
+                      <select
+                        value={activeHours.timezone}
+                        onChange={(e) => updateActiveHours({ timezone: e.target.value })}
+                        className={inputClass}
+                      >
+                        {timeZoneOptions(activeHours.timezone).map((zone) => (
+                          <option key={zone} value={zone}>{zone}</option>
+                        ))}
+                      </select>
+                    </Field>
+                  </div>
+                ) : null}
+              </div>
               <div className="rounded-md border border-border/70 px-3 py-2">
                 <ToggleField
                   label="Continue after max-turn stop"

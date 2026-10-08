@@ -13,7 +13,7 @@ import {
 } from "./native-runtime/native-workspace-finalization-ownership.js";
 import { hasStopOnlyCleanup, settleStopOnlyCleanup } from "./sandbox-stop-and-retain.js";
 import { applyWorkspaceRestoreFailure } from "@paperclipai/adapter-utils/workspace-restore-result";
-import { hasWorkspaceRestoreFailure } from "@paperclipai/shared";
+import { hasWorkspaceRestoreFailure, isWithinActiveHours, parseActiveHours } from "@paperclipai/shared";
 import { externalConversationStateSql, nonIdleSlackIssueCondition } from "./slack-conversation-state.js";
 import { settleSlackConversation } from "./slack-conversation-lifecycle.js";
 import { publicChatTaskUrl } from "./chat-task-url.js";
@@ -16742,6 +16742,7 @@ export function heartbeatService(
           heartbeat.dailySpendCentsLimit ??
           heartbeat.dailyBudgetCents,
       ),
+      activeHours: parseActiveHours(heartbeat.activeHours),
     };
   }
 
@@ -20057,6 +20058,11 @@ export function heartbeatService(
       const quotaHoldUntil = providerQuotaHoldUntil(latestFinishedRun ?? null);
       const quotaHeld =
         quotaHoldUntil !== null && quotaHoldUntil.getTime() > Date.now();
+      // Outside the agent's configured active hours, hold automatic runs the
+      // same way; resumeQueuedRuns starts them once the window opens.
+      const { activeHours } = policy;
+      const offHours =
+        activeHours !== null && !isWithinActiveHours(activeHours, new Date());
 
       const dependencyReadiness = await listQueuedRunDependencyReadiness(
         agent.companyId,
@@ -20132,11 +20138,11 @@ export function heartbeatService(
       });
 
       const claimedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
-      let quotaHeldRuns = 0;
+      let heldRuns = 0;
       for (const queuedRun of prioritizedRuns) {
         if (claimedRuns.length >= availableSlots) break;
-        if (quotaHeld && !isOperatorRequestedRun(queuedRun)) {
-          quotaHeldRuns += 1;
+        if ((quotaHeld || offHours) && !isOperatorRequestedRun(queuedRun)) {
+          heldRuns += 1;
           continue;
         }
         let claimed: typeof heartbeatRuns.$inferSelect | null;
@@ -20156,10 +20162,16 @@ export function heartbeatService(
         }
         if (claimed) claimedRuns.push(claimed);
       }
-      if (quotaHeldRuns > 0) {
+      if (heldRuns > 0 && quotaHeld) {
         logger.info(
-          { agentId, quotaHeldRuns, until: quotaHoldUntil?.toISOString() },
+          { agentId, heldRuns, until: quotaHoldUntil?.toISOString() },
           "agent is at its provider usage limit; leaving automatic runs queued until it resets",
+        );
+      }
+      if (heldRuns > 0 && offHours) {
+        logger.info(
+          { agentId, heldRuns, activeHours },
+          "agent is outside its active hours; leaving automatic runs queued until they start",
         );
       }
       if (claimedRuns.length === 0) return [];
@@ -30252,6 +30264,7 @@ export function heartbeatService(
         if (!invokability.invokable) continue;
         const policy = parseHeartbeatPolicy(agent);
         if (!policy.enabled || policy.intervalSec <= 0) continue;
+        if (policy.activeHours && !isWithinActiveHours(policy.activeHours, now)) continue;
 
         if (cutoff) {
           const eligibleIssue = await db
