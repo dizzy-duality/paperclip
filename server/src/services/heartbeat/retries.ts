@@ -266,6 +266,20 @@ function readTransientRetryNotBeforeFromRun(
 }
 
 /**
+ * Whether an operator asked for this run explicitly: a manual run, or a
+ * scheduled retry promoted with "Retry now" (which keeps its automation
+ * source). Holds on automatic runs let these through.
+ */
+export function isOperatorRequestedRun(
+  run: Pick<typeof heartbeatRuns.$inferSelect, "invocationSource" | "contextSnapshot">,
+) {
+  return (
+    run.invocationSource === "on_demand" ||
+    readNonEmptyString(parseObject(run.contextSnapshot).retryNowRequestedAt) !== null
+  );
+}
+
+/**
  * When an agent's latest finished run stopped on its provider's usage limit,
  * the time until which it should get no new automatic runs: the reset time the
  * adapter parsed from the provider's message, or else the default quota
