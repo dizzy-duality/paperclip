@@ -60,6 +60,7 @@ import { executionFailureRetryCount, executionRetryAttemptCount, accountingForSc
 import { buildHeartbeatRunStatusLiveEventPayload } from "./heartbeat-run-status-payload.js";
 export { buildHeartbeatRunStatusLiveEventPayload } from "./heartbeat-run-status-payload.js";
 import { buildExecutionContinuation, StaleExecutionContinuationError } from "./execution-continuation.js";
+import { routeLegacyAdapterContext } from "./jev-context-router.js";
 import { renderPaperclipWakePrompt } from "@paperclipai/adapter-utils/server-utils";
 import { PROJECT_REPOSITORIES_DIR, readGitWorkspaceSnapshot, disposeGitWorkspaceSnapshot } from "@paperclipai/adapter-utils/git-workspace-sync";
 import { isWorkspaceGitScanError, WorkspaceGitScanError, WORKSPACE_GIT_SCAN_ERROR_CODES } from "./workspace-git-operation-scheduler.js";
@@ -24907,7 +24908,7 @@ export function heartbeatService(
             // adapters need it in their prompt, but the authoritative answers
             // remain on the interaction instead of being duplicated in the
             // heartbeat run snapshot.
-            const adapterContext: Record<string, unknown> = {
+            const adapterContext: Record<string, unknown> = await routeLegacyAdapterContext({
               ...context,
               ...(legacyQuestionResponse
                 ? {
@@ -24917,7 +24918,7 @@ export function heartbeatService(
                     },
                   }
                 : {}),
-            };
+            });
             const runtimeTools = createAdapterRuntimeToolAccess({
               agentId: agent.id,
               companyId: agent.companyId,
