@@ -8,8 +8,13 @@ import {
 const CODEX_TRANSIENT_UPSTREAM_RE =
   /(?:we(?:'|’)re\s+currently\s+experiencing\s+high\s+demand|temporary\s+errors|rate[-\s]?limit(?:ed)?|too\s+many\s+requests|\b429\b|server\s+overloaded|service\s+unavailable|try\s+again\s+later)/i;
 const CODEX_REMOTE_COMPACTION_RE = /remote\s+compact\s+task/i;
+// Codex words the limit message in more than one way, e.g.
+//   "You've hit your usage limit for GPT-5. Switch to another model now, or try again at 4:30 PM."
+//   "You've hit your usage limit. Upgrade to Pro (https://…), visit https://…/usage to purchase
+//    more credits or try again at 8:29 AM."
+// Match any "try again at <time>" that follows the limit sentence within the same message.
 const CODEX_USAGE_LIMIT_RE =
-  /you(?:'|’)ve hit your usage limit for .+\.\s+switch to another model now,\s+or try again at\s+([^.!\n]+)(?:[.!]|\n|$)/i;
+  /you(?:'|’)ve hit your usage limit\b[^\n]{0,400}?\btry again at\s+([^!\n]+?)\s*(?:[.!](?=\s|$)|\n|$)/i;
 const CODEX_PROVIDER_QUOTA_RE =
   /(?:you(?:'|’)ve hit your usage limit|usage limit|model (?:is )?at capacity|at capacity for this model|capacity limit)/i;
 const CODEX_REFRESH_TOKEN_REUSED_RE =
