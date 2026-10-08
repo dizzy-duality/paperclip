@@ -58,6 +58,7 @@ export const help: Record<string, string> = {
   wakeOnDemand: "Allow this agent to be woken by assignments, API calls, UI actions, or automated systems.",
   cooldownSec: "Minimum seconds between consecutive heartbeat runs.",
   maxConcurrentRuns: "Maximum number of heartbeat runs that can execute simultaneously for this agent.",
+  activeHours: "Only start automatic runs (timer, assignments, comments) between these times. A manual run still starts. An end earlier than the start crosses midnight; a run still going at the end finishes.",
   maxTurnContinuationEnabled: "Automatically queue bounded continuation runs when an adapter stops because its per-run turn cap was exhausted.",
   maxTurnContinuationMaxAttempts: "Maximum automatic continuations after one max-turn stop. This is separate from max turns per run.",
   maxTurnContinuationDelaySec: "Seconds to wait before starting each max-turn continuation.",

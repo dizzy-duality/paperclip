@@ -15,6 +15,7 @@ import {
   activityLog,
 } from "@paperclipai/db";
 import {
+  isWithinActiveHours,
   type IssueExecutionMonitorPolicy,
   type IssueExecutionMonitorClearReason,
   type IssueExecutionMonitorRecoveryPolicy,
@@ -1355,6 +1356,10 @@ export function createHeartbeatScheduling(
     let checked = 0, enqueued = 0, skipped = 0;
     for (const { agent, intervalSec } of await eligibleTimerAgents()) {
       if (!canContinue()) break;
+      // Outside the agent's active hours the timer heartbeat is skipped; the
+      // overdue deadline keeps the lane polling until the window opens.
+      const { activeHours } = parseHeartbeatPolicy(agent);
+      if (activeHours && !isWithinActiveHours(activeHours, now)) continue;
       checked++;
       const deadline = await nextTimerHeartbeatAt(agent, now);
       if (deadline === null || deadline > now.getTime()) continue;

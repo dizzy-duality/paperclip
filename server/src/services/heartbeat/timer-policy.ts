@@ -1,5 +1,5 @@
 import { agents, heartbeatRuns, costEvents, issues, type Db } from "@paperclipai/db";
-import { AGENT_DEFAULT_MAX_CONCURRENT_RUNS, compareCents } from "@paperclipai/shared";
+import { AGENT_DEFAULT_MAX_CONCURRENT_RUNS, compareCents, parseActiveHours } from "@paperclipai/shared";
 import { and, eq, gte, lt, notInArray, sql, isNull, inArray, type SQL } from "drizzle-orm";
 import { asBoolean, asNumber, parseObject } from "../../adapters/utils.js";
 import { isHeartbeatWakeOnDemandEnabled } from "../heartbeat-policy.js";
@@ -68,6 +68,7 @@ export function parseHeartbeatPolicy(agent: typeof agents.$inferSelect) {
         heartbeat.dailySpendCentsLimit ??
         heartbeat.dailyBudgetCents,
     ),
+    activeHours: parseActiveHours(heartbeat.activeHours),
   };
 }
 
