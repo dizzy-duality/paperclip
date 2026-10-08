@@ -1135,6 +1135,20 @@ function readTransientRetryNotBeforeFromRun(
 }
 
 /**
+ * Whether an operator asked for this run explicitly: a manual run, or a
+ * scheduled retry promoted with "Retry now" (which keeps its automation
+ * source). Holds on automatic runs let these through.
+ */
+function isOperatorRequestedRun(
+  run: Pick<typeof heartbeatRuns.$inferSelect, "invocationSource" | "contextSnapshot">,
+) {
+  return (
+    run.invocationSource === "on_demand" ||
+    readNonEmptyString(parseObject(run.contextSnapshot).retryNowRequestedAt) !== null
+  );
+}
+
+/**
  * When an agent's latest finished run stopped on its provider's usage limit,
  * the time until which it should get no new automatic runs: the reset time the
  * adapter parsed from the provider's message, or else the default quota
@@ -20010,8 +20024,8 @@ export function heartbeatService(
       // An agent at its provider's usage limit would only fail again, starting
       // a sandbox each time. Leave its automatic runs queued (later wakes
       // coalesce into them) until the limit resets; the periodic
-      // resumeQueuedRuns pass starts them then. A manual run still starts, so
-      // an operator can check whether the limit has lifted.
+      // resumeQueuedRuns pass starts them then. A manual run or a board "Retry
+      // now" still starts, so an operator can check whether the limit has lifted.
       const [latestFinishedRun] = await db
         .select({
           errorCode: heartbeatRuns.errorCode,
@@ -20024,6 +20038,7 @@ export function heartbeatService(
         .from(heartbeatRuns)
         .where(
           and(
+            eq(heartbeatRuns.companyId, agent.companyId),
             eq(heartbeatRuns.agentId, agentId),
             inArray(heartbeatRuns.status, ["succeeded", "failed", "timed_out"]),
             isNotNull(heartbeatRuns.finishedAt),
@@ -20112,7 +20127,7 @@ export function heartbeatService(
       let quotaHeldRuns = 0;
       for (const queuedRun of prioritizedRuns) {
         if (claimedRuns.length >= availableSlots) break;
-        if (quotaHeld && queuedRun.invocationSource !== "on_demand") {
+        if (quotaHeld && !isOperatorRequestedRun(queuedRun)) {
           quotaHeldRuns += 1;
           continue;
         }
