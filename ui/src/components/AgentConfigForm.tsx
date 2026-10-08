@@ -19,7 +19,7 @@ import type {
   EnvSecretRefBinding,
   Environment,
 } from "@paperclipai/shared";
-import { AGENT_DEFAULT_MAX_CONCURRENT_RUNS, supportedEnvironmentDriversForAdapter, isValidBrowserCode, ADAPTER_AUTH_MISSING_CHECK_CODE } from "@paperclipai/shared";
+import { AGENT_DEFAULT_MAX_CONCURRENT_RUNS, ACTIVE_HOURS_TIME_RE, isValidTimeZone, parseActiveHours, supportedEnvironmentDriversForAdapter, isValidBrowserCode, ADAPTER_AUTH_MISSING_CHECK_CODE } from "@paperclipai/shared";
 import type { AdapterModel } from "../api/agents";
 import { agentsApi } from "../api/agents";
 import { ApiError } from "../api/client";
@@ -1345,6 +1345,13 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
     MAX_TURN_CONTINUATION_MAX_DELAY_SEC,
   );
 
+  const activeHours = parseActiveHours(effectiveHeartbeat.activeHours);
+
+  function updateActiveHours(patch: Partial<{ start: string; end: string; timezone: string }>) {
+    if (!activeHours) return;
+    mark("heartbeat", "activeHours", { ...activeHours, ...patch });
+  }
+
   function updateMaxTurnContinuation(patch: Record<string, unknown>) {
     mark("heartbeat", "maxTurnContinuation", {
       ...maxTurnContinuation,
@@ -2056,6 +2063,56 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                   className={inputClass}
                 />
               </Field>
+              <div className="rounded-md border border-border/70 px-3 py-2">
+                <ToggleField
+                  label="Only run during set hours"
+                  hint={help.activeHours}
+                  checked={activeHours !== null}
+                  onChange={(v) =>
+                    mark(
+                      "heartbeat",
+                      "activeHours",
+                      v
+                        ? {
+                            start: "22:00",
+                            end: "06:00",
+                            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                          }
+                        : null,
+                    )}
+                />
+                {activeHours ? (
+                  <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                    <Field label="From">
+                      <DraftInput
+                        type="time"
+                        value={activeHours.start}
+                        onCommit={(v) => ACTIVE_HOURS_TIME_RE.test(v) && updateActiveHours({ start: v })}
+                        immediate
+                        className={inputClass}
+                      />
+                    </Field>
+                    <Field label="Until">
+                      <DraftInput
+                        type="time"
+                        value={activeHours.end}
+                        onCommit={(v) => ACTIVE_HOURS_TIME_RE.test(v) && updateActiveHours({ end: v })}
+                        immediate
+                        className={inputClass}
+                      />
+                    </Field>
+                    <Field label="Time zone">
+                      <DraftInput
+                        value={activeHours.timezone}
+                        onCommit={(v) => isValidTimeZone(v.trim()) && updateActiveHours({ timezone: v.trim() })}
+                        immediate
+                        className={inputClass}
+                        placeholder="Europe/Amsterdam"
+                      />
+                    </Field>
+                  </div>
+                ) : null}
+              </div>
               <div className="rounded-md border border-border/70 px-3 py-2">
                 <ToggleField
                   label="Continue after max-turn stop"
