@@ -4,9 +4,12 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   agents,
   agentWakeupRequests,
+  authUsers,
   companies,
+  companyMemberships,
   createDb,
   heartbeatRuns,
+  issues,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -143,7 +146,8 @@ describeEmbeddedPostgres("provider quota hold on queued runs", () => {
 
   it("keeps automatic runs queued until the provider's reset time", async () => {
     const ids = await insertAgent();
-    await insertFinishedRun(ids, new Date(Date.now() - 60_000), quotaStop(new Date(Date.now() + HOUR_MS)));
+    // Stopped 2 h ago, so the 1 h default backoff alone would have released it.
+    await insertFinishedRun(ids, new Date(Date.now() - 2 * HOUR_MS), quotaStop(new Date(Date.now() + HOUR_MS)));
     const runId = await insertQueuedRun(ids);
 
     expect(await startedAfterResume(runId)).toBe(false);
@@ -165,6 +169,34 @@ describeEmbeddedPostgres("provider quota hold on queued runs", () => {
     await insertFinishedRun(ids, new Date(Date.now() - 60_000), quotaStop(new Date(Date.now() + HOUR_MS)));
     const runId = await insertQueuedRun(ids, "on_demand");
 
+    expect(await startedAfterResume(runId)).toBe(true);
+  });
+
+  it("still starts a scheduled retry the board promoted with Retry now", async () => {
+    const ids = await insertAgent();
+    await insertFinishedRun(ids, new Date(Date.now() - 60_000), quotaStop(new Date(Date.now() + HOUR_MS)));
+    const [quotaRun] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
+      .where(eq(heartbeatRuns.agentId, ids.agentId));
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId, companyId: ids.companyId, title: "Quota retry", status: "in_progress", assigneeAgentId: ids.agentId,
+    });
+    const runId = await insertQueuedRun(ids);
+    await db.update(heartbeatRuns).set({
+      status: "scheduled_retry", invocationSource: "automation", retryOfRunId: quotaRun!.id,
+      scheduledRetryAt: new Date(Date.now() + HOUR_MS), scheduledRetryReason: "transient_failure",
+      contextSnapshot: { issueId },
+    }).where(eq(heartbeatRuns.id, runId));
+    await db.update(issues).set({ executionRunId: runId }).where(eq(issues.id, issueId));
+
+    // Retry now makes the board user the run's responsible user, who must be a member.
+    await db.insert(authUsers).values({ id: "board-user", name: "Board", email: `board-${ids.companyId}@example.test`, createdAt: new Date(), updatedAt: new Date() })
+      .onConflictDoNothing();
+    await db.insert(companyMemberships).values({ companyId: ids.companyId, principalType: "user", principalId: "board-user", status: "active", membershipRole: "owner" });
+    const result = await heartbeatService(db).retryScheduledRetryNow({
+      issueId, actor: { actorType: "user", actorId: "board-user" },
+    });
+    expect(result.outcome).toBe("promoted");
     expect(await startedAfterResume(runId)).toBe(true);
   });
 

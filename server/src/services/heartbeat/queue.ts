@@ -25,7 +25,7 @@ import { assertTaskRetryConversationAllowed, readTaskRetryIntent, readTaskRetryB
 import { insertIssueComment } from "../issue-comment-writes.js";
 import { withExternalAdmissionGuard, assertNoExternalOverlap } from "../../modules/external-agents/index.js";
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
-import { normalizeAgentNameKey, providerQuotaHoldUntil } from "./retries.js";
+import { isOperatorRequestedRun, normalizeAgentNameKey, providerQuotaHoldUntil } from "./retries.js";
 import { publishActiveDotComment } from "../dot-assignment-follow-up.js";
 import { publishActiveMuseComment } from "../muse-assignment-follow-up.js";
 import {
@@ -2140,8 +2140,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       // An agent at its provider's usage limit would only fail again, starting
       // a sandbox each time. Leave its automatic runs queued (later wakes
       // coalesce into them) until the limit resets; the periodic
-      // resumeQueuedRuns pass starts them then. A manual run still starts, so
-      // an operator can check whether the limit has lifted.
+      // resumeQueuedRuns pass starts them then. A manual run or a board "Retry
+      // now" still starts, so an operator can check whether the limit has lifted.
       const [latestFinishedRun] = await db
         .select({
           errorCode: heartbeatRuns.errorCode,
@@ -2154,6 +2154,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         .from(heartbeatRuns)
         .where(
           and(
+            eq(heartbeatRuns.companyId, agent.companyId),
             eq(heartbeatRuns.agentId, agentId),
             inArray(heartbeatRuns.status, ["succeeded", "failed", "timed_out"]),
             isNotNull(heartbeatRuns.finishedAt),
@@ -2242,7 +2243,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       let quotaHeldRuns = 0;
       for (const queuedRun of prioritizedRuns) {
         if (claimedRuns.length >= availableSlots) break;
-        if (quotaHeld && queuedRun.invocationSource !== "on_demand") {
+        if (quotaHeld && !isOperatorRequestedRun(queuedRun)) {
           quotaHeldRuns += 1;
           continue;
         }
