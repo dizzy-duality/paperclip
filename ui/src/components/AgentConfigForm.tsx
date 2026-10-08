@@ -19,7 +19,7 @@ import type {
   EnvSecretRefBinding,
   Environment,
 } from "@paperclipai/shared";
-import { AGENT_DEFAULT_MAX_CONCURRENT_RUNS, ACTIVE_HOURS_TIME_RE, isValidTimeZone, parseActiveHours, supportedEnvironmentDriversForAdapter, isValidBrowserCode, ADAPTER_AUTH_MISSING_CHECK_CODE } from "@paperclipai/shared";
+import { AGENT_DEFAULT_MAX_CONCURRENT_RUNS, ACTIVE_HOURS_TIME_RE, parseActiveHours, supportedEnvironmentDriversForAdapter, isValidBrowserCode, ADAPTER_AUTH_MISSING_CHECK_CODE } from "@paperclipai/shared";
 import type { AdapterModel } from "../api/agents";
 import { agentsApi } from "../api/agents";
 import { ApiError } from "../api/client";
@@ -335,6 +335,12 @@ function ConfigSections({ order, className, children }: {
 }
 
 /* ---- Form ---- */
+
+/** Every IANA zone the browser knows, plus the current one if it is missing (e.g. "UTC"). */
+function timeZoneOptions(current: string) {
+  const zones = Intl.supportedValuesOf("timeZone");
+  return zones.includes(current) ? zones : [current, ...zones];
+}
 
 export function AgentConfigForm(props: AgentConfigFormProps) {
   const { mode, adapterModels: externalModels } = props;
@@ -2082,33 +2088,35 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                     )}
                 />
                 {activeHours ? (
+                  // Controlled inputs: a value that is not a valid time or zone
+                  // is never stored, so the field snaps back to what Save sends.
                   <div className="mt-3 grid gap-3 sm:grid-cols-3">
                     <Field label="From">
-                      <DraftInput
+                      <input
                         type="time"
                         value={activeHours.start}
-                        onCommit={(v) => ACTIVE_HOURS_TIME_RE.test(v) && updateActiveHours({ start: v })}
-                        immediate
+                        onChange={(e) => ACTIVE_HOURS_TIME_RE.test(e.target.value) && updateActiveHours({ start: e.target.value })}
                         className={inputClass}
                       />
                     </Field>
                     <Field label="Until">
-                      <DraftInput
+                      <input
                         type="time"
                         value={activeHours.end}
-                        onCommit={(v) => ACTIVE_HOURS_TIME_RE.test(v) && updateActiveHours({ end: v })}
-                        immediate
+                        onChange={(e) => ACTIVE_HOURS_TIME_RE.test(e.target.value) && updateActiveHours({ end: e.target.value })}
                         className={inputClass}
                       />
                     </Field>
                     <Field label="Time zone">
-                      <DraftInput
+                      <select
                         value={activeHours.timezone}
-                        onCommit={(v) => isValidTimeZone(v.trim()) && updateActiveHours({ timezone: v.trim() })}
-                        immediate
+                        onChange={(e) => updateActiveHours({ timezone: e.target.value })}
                         className={inputClass}
-                        placeholder="Europe/Amsterdam"
-                      />
+                      >
+                        {timeZoneOptions(activeHours.timezone).map((zone) => (
+                          <option key={zone} value={zone}>{zone}</option>
+                        ))}
+                      </select>
                     </Field>
                   </div>
                 ) : null}

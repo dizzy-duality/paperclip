@@ -739,6 +739,41 @@ describe("AgentConfigForm environment selector", () => {
     vi.clearAllMocks();
   });
 
+  it("never shows an active-hours value that Save would not send", async () => {
+    let save: (() => void) | null = null;
+    const result = await renderForm([], {
+      runtimeConfig: { heartbeat: { activeHours: { start: "22:00", end: "06:00", timezone: "UTC" } } },
+    }, { onSaveActionChange: action => { save = action; } });
+    roots.push(result.root);
+    const advanced = [...result.container.querySelectorAll("button")].find(b => b.textContent?.includes("Advanced Run Policy"));
+    await act(() => { advanced?.click(); });
+    await flushReact();
+    const [from] = result.container.querySelectorAll<HTMLInputElement>('input[type="time"]');
+    const zone = [...result.container.querySelectorAll<HTMLSelectElement>("select")]
+      .find(select => [...select.options].some(option => option.value === "Europe/Amsterdam"))!;
+
+    await act(() => { setInputValue(from!, "21:00"); });
+    await flushReact();
+    // A cleared time is not a valid value: the field shows the last valid one.
+    await act(() => { setInputValue(from!, ""); });
+    await flushReact();
+    expect(from!.value).toBe("21:00");
+    await act(() => {
+      zone.value = "Europe/Amsterdam";
+      zone.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await flushReact();
+
+    await act(async () => { await save?.(); });
+    expect(result.onSave).toHaveBeenCalledWith(expect.objectContaining({
+      runtimeConfig: expect.objectContaining({ heartbeat: expect.objectContaining({
+        activeHours: { start: "21:00", end: "06:00", timezone: "Europe/Amsterdam" },
+      }) }),
+    }));
+    expect(from!.value).toBe("21:00");
+    expect(zone.value).toBe("Europe/Amsterdam");
+  });
+
   it("promotes environment drafts through the page Save action and discards them through the page Discard action", async () => {
     const dirty = vi.fn();
     let save: (() => void) | null = null;
