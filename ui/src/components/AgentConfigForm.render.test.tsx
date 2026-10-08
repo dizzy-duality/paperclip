@@ -772,6 +772,8 @@ describe("AgentConfigForm environment selector", () => {
     }));
     expect(from!.value).toBe("21:00");
     expect(zone.value).toBe("Europe/Amsterdam");
+    // UTC stays selectable after moving away from it.
+    expect([...zone.options].some(option => option.value === "UTC")).toBe(true);
   });
 
   it("promotes environment drafts through the page Save action and discards them through the page Discard action", async () => {

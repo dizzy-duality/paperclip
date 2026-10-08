@@ -336,10 +336,12 @@ function ConfigSections({ order, className, children }: {
 
 /* ---- Form ---- */
 
-/** Every IANA zone the browser knows, plus the current one if it is missing (e.g. "UTC"). */
+/**
+ * Every IANA zone the browser knows, plus UTC (Chromium leaves it out) and the
+ * current value, so a stored zone is never dropped from the picker.
+ */
 function timeZoneOptions(current: string) {
-  const zones = Intl.supportedValuesOf("timeZone");
-  return zones.includes(current) ? zones : [current, ...zones];
+  return [...new Set([current, "UTC", ...Intl.supportedValuesOf("timeZone")])];
 }
 
 export function AgentConfigForm(props: AgentConfigFormProps) {
