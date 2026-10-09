@@ -2943,6 +2943,21 @@ export function agentRoutes(
     };
   }
 
+  // Adapters fill desiredSkillEntries[].versionId from the runtime entries, which carry the version a
+  // GitHub-source skill currently resolves to. Clients send these entries back on the next sync, so an
+  // unpinned skill would be saved as pinned to today's version and never see an update. Report the pins
+  // stored in the agent's config instead; entries[].versionId still shows what runs.
+  function withStoredSkillPins(snapshot: AgentSkillSnapshot, adapterConfig: unknown): AgentSkillSnapshot {
+    const stored = new Map(
+      readPaperclipSkillSyncPreference(adapterConfig as Record<string, unknown>).desiredSkillEntries
+        .map((entry) => [entry.key, entry.versionId] as const),
+    );
+    return {
+      ...snapshot,
+      desiredSkillEntries: snapshot.desiredSkills.map((key) => ({ key, versionId: stored.get(key) ?? null })),
+    };
+  }
+
   // CEO and board-created onboarding chief-of-staff instructions assume the
   // core paperclip skills (board coordination, planning, hiring, memory).
   // Union them into these skills-capable hires/creates so their desired skills
@@ -3922,7 +3937,7 @@ export function agentRoutes(
       adapterType: agent.adapterType,
       config: connectorConfig,
     });
-    res.json(annotateConnectorSkills(snapshot, connectorAssignments));
+    res.json(annotateConnectorSkills(withStoredSkillPins(snapshot, agent.adapterConfig), connectorAssignments));
   });
 
   router.post(
@@ -4022,7 +4037,7 @@ export function agentRoutes(
         },
       });
 
-      res.json(annotateConnectorSkills(snapshot, connectorAssignments));
+      res.json(annotateConnectorSkills(withStoredSkillPins(snapshot, updated.adapterConfig), connectorAssignments));
     },
   );
 
