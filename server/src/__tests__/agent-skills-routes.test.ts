@@ -754,6 +754,48 @@ describe.sequential("agent skill routes", () => {
     );
   });
 
+  it("reports stored version pins, not the versions the runtime resolves to", async () => {
+    mockInstanceSettingsService.getExperimental.mockResolvedValue({ enableBetaSkills: true });
+    const pinned = "22222222-2222-4222-8222-222222222222";
+    mockAgentService.getById.mockResolvedValue({
+      ...makeAgent("claude_local"),
+      adapterConfig: {
+        paperclipSkillSync: { desiredSkills: ["company-1/live", { key: "company-1/pinned", versionId: pinned }] },
+      },
+    });
+    // What adapters report: the runtime version of every GitHub-source skill, pinned or not.
+    const runtimeSnapshot = {
+      adapterType: "claude_local",
+      supported: true,
+      mode: "ephemeral",
+      desiredSkills: ["company-1/live", "company-1/pinned"],
+      desiredSkillEntries: [
+        { key: "company-1/live", versionId: "33333333-3333-4333-8333-333333333333" },
+        { key: "company-1/pinned", versionId: pinned },
+      ],
+      entries: [],
+      warnings: [],
+    };
+    mockAdapter.listSkills.mockResolvedValue(runtimeSnapshot);
+    mockAdapter.syncSkills.mockResolvedValue(runtimeSnapshot);
+    const expected = [
+      { key: "company-1/live", versionId: null },
+      { key: "company-1/pinned", versionId: pinned },
+    ];
+    const app = await createApp();
+
+    const listed = await requestApp(app, (baseUrl) => request(baseUrl)
+      .get("/api/agents/11111111-1111-4111-8111-111111111111/skills?companyId=company-1"));
+    expect(listed.status, JSON.stringify(listed.body)).toBe(200);
+    expect(listed.body.desiredSkillEntries).toEqual(expected);
+
+    const synced = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post("/api/agents/11111111-1111-4111-8111-111111111111/skills/sync?companyId=company-1")
+      .send({ mode: "replace", desiredSkills: expected }));
+    expect(synced.status, JSON.stringify(synced.body)).toBe(200);
+    expect(synced.body.desiredSkillEntries).toEqual(expected);
+  });
+
   it("preserves stale desired keys instead of 422-ing when syncing (PAP-13222)", async () => {
     mockAgentService.getById.mockResolvedValue(makeAgent("acpx_local"));
     // The agent already carries a stale desired key that no longer resolves to a
