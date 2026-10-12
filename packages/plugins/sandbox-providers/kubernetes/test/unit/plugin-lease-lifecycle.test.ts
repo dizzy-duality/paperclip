@@ -167,8 +167,12 @@ describe("onEnvironmentDestroyLease", () => {
     const deletePod = vi.fn().mockResolvedValue({});
     const deleteSecret = vi.fn().mockResolvedValue({});
     h.clients = {
-      custom: { deleteNamespacedCustomObject: deleteCr },
-      core: { deleteNamespacedPod: deletePod, deleteNamespacedSecret: deleteSecret },
+      custom: { deleteNamespacedCustomObject: deleteCr, getNamespacedCustomObject: vi.fn().mockRejectedValue(notFound()) },
+      core: {
+        deleteNamespacedPod: deletePod,
+        deleteNamespacedSecret: deleteSecret,
+        readNamespacedPod: vi.fn().mockRejectedValue(notFound()),
+      },
       batch: { deleteNamespacedJob: vi.fn() },
     };
 
@@ -196,10 +200,14 @@ describe("onEnvironmentDestroyLease", () => {
 
   it("is idempotent: resolves cleanly when every resource is already gone (404)", async () => {
     h.clients = {
-      custom: { deleteNamespacedCustomObject: vi.fn().mockRejectedValue(notFound()) },
+      custom: {
+        deleteNamespacedCustomObject: vi.fn().mockRejectedValue(notFound()),
+        getNamespacedCustomObject: vi.fn().mockRejectedValue(notFound()),
+      },
       core: {
         deleteNamespacedPod: vi.fn().mockRejectedValue(notFound()),
         deleteNamespacedSecret: vi.fn().mockRejectedValue(notFound()),
+        readNamespacedPod: vi.fn().mockRejectedValue(notFound()),
       },
       batch: { deleteNamespacedJob: vi.fn() },
     };
@@ -213,7 +221,7 @@ describe("onEnvironmentDestroyLease", () => {
         providerLeaseId: "pc-abc",
         leaseMetadata: leaseMetadata(),
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ providerLeaseId: "pc-abc", state: "destroyed" });
   });
 
   it("is a no-op when providerLeaseId is null", async () => {
@@ -244,8 +252,9 @@ describe("onEnvironmentDestroyLease", () => {
       core: {
         deleteNamespacedPod: vi.fn().mockResolvedValue({}),
         deleteNamespacedSecret: vi.fn().mockResolvedValue({}),
+        readNamespacedPod: vi.fn().mockRejectedValue(notFound()),
       },
-      batch: { deleteNamespacedJob: deleteJob },
+      batch: { deleteNamespacedJob: deleteJob, readNamespacedJobStatus: vi.fn().mockRejectedValue(notFound()) },
     };
 
     await plugin.definition.onEnvironmentDestroyLease!({
@@ -261,5 +270,60 @@ describe("onEnvironmentDestroyLease", () => {
       expect.objectContaining({ namespace: "paperclip-acme", name: "pc-job" }),
     );
     expect(deleteCr).not.toHaveBeenCalled();
+  });
+});
+
+describe("onEnvironmentReleaseLease", () => {
+  const release = () => plugin.definition.onEnvironmentReleaseLease!({
+    driverKey: "kubernetes",
+    companyId: "acme",
+    environmentId: "env-1",
+    config: CONFIG,
+    providerLeaseId: "pc-abc",
+    leaseMetadata: leaseMetadata(),
+  });
+
+  it("returns a destroyed receipt only after the Sandbox and its pod are gone", async () => {
+    vi.useFakeTimers();
+    try {
+      const readPod = vi.fn()
+        .mockResolvedValueOnce({ status: { phase: "Running" } })
+        .mockRejectedValue(notFound());
+      h.clients = {
+        custom: {
+          deleteNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+          getNamespacedCustomObject: vi.fn().mockRejectedValue(notFound()),
+        },
+        core: { readNamespacedPod: readPod },
+      };
+
+      const receipt = release();
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      await expect(receipt).resolves.toEqual({ providerLeaseId: "pc-abc", state: "destroyed" });
+      expect(readPod).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("returns no receipt while the pod is still terminating", async () => {
+    vi.useFakeTimers();
+    try {
+      h.clients = {
+        custom: {
+          deleteNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+          getNamespacedCustomObject: vi.fn().mockRejectedValue(notFound()),
+        },
+        core: { readNamespacedPod: vi.fn().mockResolvedValue({ status: { phase: "Running" } }) },
+      };
+
+      const receipt = release();
+      await vi.advanceTimersByTimeAsync(21_000);
+
+      await expect(receipt).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
