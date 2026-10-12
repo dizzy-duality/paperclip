@@ -15,6 +15,7 @@ import type {
   PluginEnvironmentSyncInParams,
   PluginEnvironmentSyncOutParams,
   PluginEnvironmentSyncResult,
+  PluginEnvironmentTerminationReceipt,
   PluginEnvironmentValidateConfigParams,
   PluginEnvironmentValidationResult,
 } from "@paperclipai/plugin-sdk";
@@ -38,7 +39,7 @@ import {
 } from "./sandbox-cr-orchestrator.js";
 import { describeExecError, execInPod, execInPodStreaming, retryExecSetup, stageCommandEnv } from "./pod-exec.js";
 import { performSyncIn, performSyncOut, type PodStreamExec } from "./file-sync.js";
-import { checkLeaseResumable, destroyLeaseResources } from "./lease-lifecycle.js";
+import { checkLeaseResumable, destroyLeaseResources, waitForLeaseGone } from "./lease-lifecycle.js";
 import {
   appendNetworkEgressDenyHint,
   createScopedNetworkEgressPolicyOrReleaseWorkload,
@@ -211,6 +212,15 @@ async function resolveSyncPodExec(
       timeoutMs: io.timeoutMs ?? timeoutMs,
     });
   return { exec, timeoutMs };
+}
+
+// The server starts a message queued behind a stopped run only on this
+// receipt, so it is issued once the workload and its pod are really gone.
+async function terminationReceipt(
+  clients: ReturnType<typeof makeKubeClients>,
+  lease: Parameters<typeof waitForLeaseGone>[1],
+): Promise<PluginEnvironmentTerminationReceipt | void> {
+  if (await waitForLeaseGone(clients, lease)) return { providerLeaseId: lease.name, state: "destroyed" };
 }
 
 const plugin = definePlugin({
@@ -593,7 +603,7 @@ const plugin = definePlugin({
 
   async onEnvironmentReleaseLease(
     params: PluginEnvironmentReleaseLeaseParams,
-  ): Promise<void> {
+  ): Promise<PluginEnvironmentTerminationReceipt | void> {
     if (!params.providerLeaseId) return;
     const config = kubernetesProviderConfigSchema.parse(params.config);
     const namespace =
@@ -628,11 +638,19 @@ const plugin = definePlugin({
         ?? (err as { code?: number; statusCode?: number }).statusCode;
       if (code !== 404) throw err;
     }
+    return terminationReceipt(clients, {
+      namespace,
+      name: params.providerLeaseId,
+      backend: leaseBackend,
+      podName: typeof params.leaseMetadata?.podName === "string" && params.leaseMetadata.podName.length > 0
+        ? params.leaseMetadata.podName
+        : null,
+    });
   },
 
   async onEnvironmentDestroyLease(
     params: PluginEnvironmentDestroyLeaseParams,
-  ): Promise<void> {
+  ): Promise<PluginEnvironmentTerminationReceipt | void> {
     if (!params.providerLeaseId) return;
     const config = kubernetesProviderConfigSchema.parse(params.config);
     const namespace =
@@ -673,6 +691,7 @@ const plugin = definePlugin({
       podName,
       secretName,
     });
+    return terminationReceipt(clients, { namespace, name: params.providerLeaseId, backend: leaseBackend, podName });
   },
 
   async onEnvironmentExecute(
