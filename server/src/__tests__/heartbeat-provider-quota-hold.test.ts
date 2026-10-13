@@ -211,6 +211,10 @@ describeEmbeddedPostgres("provider quota hold on queued runs", () => {
     await drainHeartbeatRunsToQuiescence(db, heartbeat);
     expect(executedRunIds).toEqual([firstRunId, secondRunId]);
     expect(await heartbeat.getAgentRunHold(ids.agentId)).toBeNull();
+    // Not a scheduled retry: Slack settlement refuses runs that carry one.
+    const [resumed] = await db.select({ scheduledRetryAt: heartbeatRuns.scheduledRetryAt }).from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, firstRunId));
+    expect(resumed?.scheduledRetryAt).toBeNull();
   });
 
   it("holds a later automatic retry that inherited an earlier Retry now", async () => {

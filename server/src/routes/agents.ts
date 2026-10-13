@@ -4419,8 +4419,9 @@ export function agentRoutes(
 
   router.get("/agents/:id/run-hold", async (req, res) => {
     const id = req.params.id as string;
-    const agent = await getAccessibleAgent(req, res, id);
+    const agent = await getAccessibleResource(req, res, svc.getById(id), "Agent not found");
     if (!agent) return;
+    if (!(await assertAgentReadAllowed(req, res, agent))) return;
     res.json({ hold: await heartbeat.getAgentRunHold(id) });
   });
 
