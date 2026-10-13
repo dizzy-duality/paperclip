@@ -1400,6 +1400,8 @@ export function heartbeatService(
     resumeQueuedRuns,
     parseHeartbeatPolicy,
     claimDueTimerHeartbeat,
+    getAgentRunHold,
+    resumeHeldRun,
   } = heartbeatQueue;
 
   // Earlier factories capture these callbacks before queue construction.
@@ -5252,6 +5254,8 @@ export function heartbeatService(
 
     promoteDueScheduledRetries,
     retryScheduledRetryNow,
+    getAgentRunHold,
+    resumeHeldRun,
 
     resumeQueuedRuns,
 
