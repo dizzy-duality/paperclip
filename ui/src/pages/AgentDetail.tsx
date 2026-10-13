@@ -8,6 +8,8 @@ import { ProviderFailureNotice } from "@/components/ProviderFailureNotice";
 import { readProviderFailure } from "@paperclipai/shared";
 import { AgentConnectionInstructions } from "@/features/connections/ConnectionInstructions";
 import type { AgentInstructionCandidate, AgentInstructionsBundle } from "@paperclipai/shared";
+import { AgentRunHoldNotice } from "../components/AgentRunHoldNotice";
+import { canBoardManageRuntime } from "@/lib/recovery-reconcile";
 import { InstructionHistory } from "../components/InstructionHistory";
 import { AgentCharacter } from "../components/AgentCharacter";
 import { characterStateForAgent, HEARTBEAT_RUN_LIST_DEFAULT_LIMIT } from "@paperclipai/shared";
@@ -1074,6 +1076,11 @@ export function AgentDetail() {
           ) : null}
         </div>
       ) : null}
+
+      {activeView === "overview" && resolvedCompanyId && (
+        <AgentRunHoldNotice agentId={agent.id} agentName={agent.name} companyId={resolvedCompanyId}
+          canResume={canBoardManageRuntime(resolvedCompanyId, boardAccess)} />
+      )}
 
       {/* View content */}
       {isAgentAuditView(activeView) && resolvedCompanyId ? (
