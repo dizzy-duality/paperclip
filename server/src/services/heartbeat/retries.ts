@@ -274,9 +274,12 @@ function readTransientRetryNotBeforeFromRun(
  * scheduledRetryAt.
  */
 export function isOperatorRequestedRun(
-  run: Pick<typeof heartbeatRuns.$inferSelect, "invocationSource" | "contextSnapshot" | "scheduledRetryAt">,
+  run: Pick<typeof heartbeatRuns.$inferSelect, "id" | "invocationSource" | "contextSnapshot" | "scheduledRetryAt">,
 ) {
   if (run.invocationSource === "on_demand") return true;
+  // "Resume now" names the run itself, so a retry that copies this context
+  // snapshot does not inherit the bypass.
+  if (parseObject(run.contextSnapshot).holdResumedRunId === run.id) return true;
   const retryNowRequestedAt = readNonEmptyString(
     parseObject(run.contextSnapshot).retryNowRequestedAt,
   );

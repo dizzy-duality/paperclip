@@ -1976,10 +1976,10 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     await db
       .update(heartbeatRuns)
       .set({
-        scheduledRetryAt: now,
         contextSnapshot: {
           ...parseObject(run.contextSnapshot),
-          retryNowRequestedAt: now.toISOString(),
+          holdResumedRunId: run.id,
+          holdResumedAt: now.toISOString(),
         },
         updatedAt: now,
       })
