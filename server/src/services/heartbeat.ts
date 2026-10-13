@@ -1143,9 +1143,12 @@ function readTransientRetryNotBeforeFromRun(
  * scheduledRetryAt.
  */
 function isOperatorRequestedRun(
-  run: Pick<typeof heartbeatRuns.$inferSelect, "invocationSource" | "contextSnapshot" | "scheduledRetryAt">,
+  run: Pick<typeof heartbeatRuns.$inferSelect, "id" | "invocationSource" | "contextSnapshot" | "scheduledRetryAt">,
 ) {
   if (run.invocationSource === "on_demand") return true;
+  // "Resume now" names the run itself, so a retry that copies this context
+  // snapshot does not inherit the bypass.
+  if (parseObject(run.contextSnapshot).holdResumedRunId === run.id) return true;
   const retryNowRequestedAt = readNonEmptyString(
     parseObject(run.contextSnapshot).retryNowRequestedAt,
   );
@@ -19989,6 +19992,101 @@ export function heartbeatService(
     }
   }
 
+  // Why an agent's automatic runs stay queued, or null when nothing holds them.
+  // At its provider's usage limit an agent would only fail again, starting a
+  // sandbox each time: hold until the limit resets. Outside its active hours,
+  // hold until the window opens. Later wakes coalesce into the held runs and
+  // the periodic resumeQueuedRuns pass starts them. An operator-requested run
+  // (a manual run, "Retry now", "Resume now") still starts, so an operator can
+  // check whether the limit has lifted.
+  async function readAgentRunHold(
+    agent: typeof agents.$inferSelect,
+    policy: ReturnType<typeof parseHeartbeatPolicy>,
+  ): Promise<{ reason: "provider_quota" | "off_hours"; until: Date | null } | null> {
+    const [latestFinishedRun] = await db
+      .select({
+        errorCode: heartbeatRuns.errorCode,
+        finishedAt: heartbeatRuns.finishedAt,
+        resultJson: sql<Record<string, unknown> | null>`jsonb_build_object(
+          'errorFamily', ${heartbeatRuns.resultJson}->'errorFamily',
+          'retryNotBefore', ${heartbeatRuns.resultJson}->'retryNotBefore',
+          'transientRetryNotBefore', ${heartbeatRuns.resultJson}->'transientRetryNotBefore')`,
+      })
+      .from(heartbeatRuns)
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, agent.companyId),
+          eq(heartbeatRuns.agentId, agent.id),
+          inArray(heartbeatRuns.status, ["succeeded", "failed", "timed_out"]),
+          isNotNull(heartbeatRuns.finishedAt),
+        ),
+      )
+      .orderBy(desc(heartbeatRuns.finishedAt))
+      .limit(1);
+    const quotaHoldUntil = providerQuotaHoldUntil(latestFinishedRun ?? null);
+    if (quotaHoldUntil !== null && quotaHoldUntil.getTime() > Date.now()) {
+      return { reason: "provider_quota", until: quotaHoldUntil };
+    }
+    const { activeHours } = policy;
+    if (activeHours !== null && !isWithinActiveHours(activeHours, new Date())) {
+      return { reason: "off_hours", until: null };
+    }
+    return null;
+  }
+
+  async function listHeldQueuedRuns(agentId: string) {
+    const queued = await db
+      .select({
+        id: heartbeatRuns.id,
+        invocationSource: heartbeatRuns.invocationSource,
+        contextSnapshot: heartbeatRuns.contextSnapshot,
+        scheduledRetryAt: heartbeatRuns.scheduledRetryAt,
+      })
+      .from(heartbeatRuns)
+      .where(and(eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, "queued")))
+      .orderBy(asc(heartbeatRuns.createdAt));
+    return queued.filter((run) => !isOperatorRequestedRun(run));
+  }
+
+  async function getAgentRunHold(agentId: string) {
+    const agent = await getAgent(agentId);
+    if (!agent) throw notFound("Agent not found");
+    const hold = await readAgentRunHold(agent, parseHeartbeatPolicy(agent));
+    if (!hold) return null;
+    return {
+      reason: hold.reason,
+      until: hold.until?.toISOString() ?? null,
+      heldRuns: (await listHeldQueuedRuns(agentId)).length,
+    };
+  }
+
+  // "Resume now": start the oldest held run as if an operator asked for it.
+  // If the hold was wrong, that run finishes and lifts it for the rest; if
+  // the limit is real, it fails on it and the hold stays.
+  async function resumeHeldRun(agentId: string) {
+    const [run] = await listHeldQueuedRuns(agentId);
+    if (!run) return { outcome: "no_held_run" as const, runId: null };
+    const now = new Date();
+    await db
+      .update(heartbeatRuns)
+      .set({
+        contextSnapshot: {
+          ...parseObject(run.contextSnapshot),
+          holdResumedRunId: run.id,
+          holdResumedAt: now.toISOString(),
+        },
+        updatedAt: now,
+      })
+      .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "queued")));
+    const started = await startNextQueuedRunForAgent(agentId);
+    return {
+      outcome: started.some((claimed) => claimed.id === run.id)
+        ? ("started" as const)
+        : ("requested" as const),
+      runId: run.id,
+    };
+  }
+
   async function startNextQueuedRunForAgent(agentId: string) {
     if ((await getSchedulingSuppression()).suppressed) return [];
     const cutoff = await getWorktreeExecutionCutoff();
@@ -20030,39 +20128,7 @@ export function heartbeatService(
         .orderBy(asc(heartbeatRuns.createdAt));
       if (queuedRuns.length === 0) return [];
 
-      // An agent at its provider's usage limit would only fail again, starting
-      // a sandbox each time. Leave its automatic runs queued (later wakes
-      // coalesce into them) until the limit resets; the periodic
-      // resumeQueuedRuns pass starts them then. A manual run or a board "Retry
-      // now" still starts, so an operator can check whether the limit has lifted.
-      const [latestFinishedRun] = await db
-        .select({
-          errorCode: heartbeatRuns.errorCode,
-          finishedAt: heartbeatRuns.finishedAt,
-          resultJson: sql<Record<string, unknown> | null>`jsonb_build_object(
-            'errorFamily', ${heartbeatRuns.resultJson}->'errorFamily',
-            'retryNotBefore', ${heartbeatRuns.resultJson}->'retryNotBefore',
-            'transientRetryNotBefore', ${heartbeatRuns.resultJson}->'transientRetryNotBefore')`,
-        })
-        .from(heartbeatRuns)
-        .where(
-          and(
-            eq(heartbeatRuns.companyId, agent.companyId),
-            eq(heartbeatRuns.agentId, agentId),
-            inArray(heartbeatRuns.status, ["succeeded", "failed", "timed_out"]),
-            isNotNull(heartbeatRuns.finishedAt),
-          ),
-        )
-        .orderBy(desc(heartbeatRuns.finishedAt))
-        .limit(1);
-      const quotaHoldUntil = providerQuotaHoldUntil(latestFinishedRun ?? null);
-      const quotaHeld =
-        quotaHoldUntil !== null && quotaHoldUntil.getTime() > Date.now();
-      // Outside the agent's configured active hours, hold automatic runs the
-      // same way; resumeQueuedRuns starts them once the window opens.
-      const { activeHours } = policy;
-      const offHours =
-        activeHours !== null && !isWithinActiveHours(activeHours, new Date());
+      const hold = await readAgentRunHold(agent, policy);
 
       const dependencyReadiness = await listQueuedRunDependencyReadiness(
         agent.companyId,
@@ -20141,7 +20207,7 @@ export function heartbeatService(
       let heldRuns = 0;
       for (const queuedRun of prioritizedRuns) {
         if (claimedRuns.length >= availableSlots) break;
-        if ((quotaHeld || offHours) && !isOperatorRequestedRun(queuedRun)) {
+        if (hold && !isOperatorRequestedRun(queuedRun)) {
           heldRuns += 1;
           continue;
         }
@@ -20162,15 +20228,15 @@ export function heartbeatService(
         }
         if (claimed) claimedRuns.push(claimed);
       }
-      if (heldRuns > 0 && quotaHeld) {
+      if (heldRuns > 0 && hold?.reason === "provider_quota") {
         logger.info(
-          { agentId, heldRuns, until: quotaHoldUntil?.toISOString() },
+          { agentId, heldRuns, until: hold.until?.toISOString() },
           "agent is at its provider usage limit; leaving automatic runs queued until it resets",
         );
       }
-      if (heldRuns > 0 && offHours) {
+      if (heldRuns > 0 && hold?.reason === "off_hours") {
         logger.info(
-          { agentId, heldRuns, activeHours },
+          { agentId, heldRuns, activeHours: policy.activeHours },
           "agent is outside its active hours; leaving automatic runs queued until they start",
         );
       }
@@ -30192,6 +30258,8 @@ export function heartbeatService(
 
     promoteDueScheduledRetries,
     retryScheduledRetryNow,
+    getAgentRunHold,
+    resumeHeldRun,
 
     resumeQueuedRuns,
 

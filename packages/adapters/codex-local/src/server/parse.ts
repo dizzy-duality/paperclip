@@ -133,6 +133,25 @@ export function isCodexUnknownSessionError(stdout: string, stderr: string): bool
   );
 }
 
+// Codex's own failures reach stdout as `error` / `turn.failed` events. Every
+// other JSONL event (item.*, turn.completed, …) carries the agent's transcript:
+// the files it read, the commands it ran, what it wrote. A task that merely
+// mentions "usage limit" must not hold the agent as if codex had hit one.
+function codexOwnStdout(stdout: string): string {
+  return stdout
+    .split(/\r?\n/)
+    .flatMap((line) => {
+      const event = parseJson(line.trim());
+      if (!event) return [line];
+      const type = asString(event.type, "");
+      if (!type) return [line];
+      if (type === "error") return [asString(event.message, "")];
+      if (type === "turn.failed") return [asString(parseObject(event.error).message, "")];
+      return [];
+    })
+    .join("\n");
+}
+
 function buildCodexErrorHaystack(input: {
   stdout?: string | null;
   stderr?: string | null;
@@ -140,7 +159,7 @@ function buildCodexErrorHaystack(input: {
 }): string {
   return [
     input.errorMessage ?? "",
-    input.stdout ?? "",
+    codexOwnStdout(input.stdout ?? ""),
     input.stderr ?? "",
   ]
     .join("\n")

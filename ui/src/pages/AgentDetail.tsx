@@ -1,4 +1,6 @@
 import type { AgentInstructionCandidate, AgentInstructionsBundle } from "@paperclipai/shared";
+import { AgentRunHoldNotice } from "../components/AgentRunHoldNotice";
+import { canBoardManageRuntime } from "@/lib/recovery-reconcile";
 import { InstructionHistory } from "../components/InstructionHistory";
 import { AgentCharacter } from "../components/AgentCharacter";
 import { characterStateForAgent } from "@paperclipai/shared";
@@ -1388,6 +1390,11 @@ export function AgentDetail() {
       )}
 
       {activeView !== "run-detail" && activeView !== "channels" && <h2 className="text-xl font-semibold">{activeView === "secrets" ? "Secrets & variables" : AGENT_DETAIL_NAVIGATION.flatMap(section => section.items).find(item => item.value === activeView)?.label}</h2>}
+
+      {activeView === "overview" && resolvedCompanyId && (
+        <AgentRunHoldNotice agentId={agent.id} agentName={agent.name} companyId={resolvedCompanyId}
+          canResume={canBoardManageRuntime(resolvedCompanyId, boardAccess)} />
+      )}
 
       {/* View content */}
       {activeView === "overview" && (

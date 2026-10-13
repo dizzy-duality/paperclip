@@ -10,6 +10,7 @@ import { agentChatDraft } from "@/lib/agent-chat-draft";
 import { Settings as ChatSettings } from "lucide-react";
 import { agentDetailHref } from "./agent-detail-navigation";
 import { deriveInitials } from "@/components/Identity";
+import { AgentRunHoldNotice } from "../components/AgentRunHoldNotice";
 import { ExecutionBlockerNotice } from "../components/ExecutionBlockerNotice";
 import type { TaskComposerPause } from "../components/task-chat/TaskChatPausedTakeover";
 import { TaskDetailTasksPanel } from "@/components/task-detail/TaskDetailTasksPanel";
@@ -3223,6 +3224,21 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     },
   );
 
+  // Shares the active-run cache entry; only a queued run can be held.
+  const { data: queuedRunAgentId = null } = useQuery<
+    ActiveRunForIssue | null,
+    Error,
+    string | null
+  >({
+    queryKey: queryKeys.issues.activeRun(issueId!),
+    queryFn: () => heartbeatsApi.activeRunForIssue(issueId!),
+    enabled:
+      !!issueId && (!!issue?.executionRunId || issue?.status === "in_progress"),
+    select: (run) => (run?.status === "queued" ? run.agentId : null),
+    placeholderData: keepPreviousDataForSameQueryTail<ActiveRunForIssue | null>(
+      issueId ?? "pending",
+    ),
+  });
   const { data: hasActiveRun = false } = useQuery<
     ActiveRunForIssue | null,
     Error,
@@ -7781,6 +7797,10 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
             >
               <WorkspaceExportRecovery key={issue.activeRecoveryAction?.id ?? issue.id} issueId={issue.id}
                 action={issue.activeRecoveryAction ?? null} canManage={canManageBoardRuntime} onQueued={invalidateIssueDetail} />
+              {queuedRunAgentId && (
+                <AgentRunHoldNotice agentId={queuedRunAgentId} companyId={issue.companyId}
+                  agentName={agentMap?.get(queuedRunAgentId)?.name ?? "This agent"} canResume={canManageBoardRuntime} />
+              )}
               {issue.executionBlocker && (
                 <ExecutionBlockerNotice companyId={issue.companyId} issueId={issue.id} blocker={issue.executionBlocker} onRetried={invalidateIssueDetail} />
               )}

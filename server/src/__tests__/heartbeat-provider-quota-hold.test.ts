@@ -194,6 +194,29 @@ describeEmbeddedPostgres("provider quota hold on queued runs", () => {
     expect(await startedAfterResume(runId)).toBe(true);
   });
 
+  it("reports the hold, and Resume now starts the oldest held run, whose success lifts it for the rest", async () => {
+    const ids = await insertAgent();
+    const resetAt = new Date(Date.now() + HOUR_MS);
+    await insertFinishedRun(ids, new Date(Date.now() - 60_000), quotaStop(resetAt));
+    const firstRunId = await insertQueuedRun(ids);
+    const secondRunId = await insertQueuedRun(ids);
+    const heartbeat = heartbeatService(db);
+
+    expect(await heartbeat.getAgentRunHold(ids.agentId)).toEqual({
+      reason: "provider_quota", until: resetAt.toISOString(), heldRuns: 2,
+    });
+
+    expect(await heartbeat.resumeHeldRun(ids.agentId)).toEqual({ outcome: "started", runId: firstRunId });
+    // Its success lifts the hold, so the run finishing promotes the next one.
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    expect(executedRunIds).toEqual([firstRunId, secondRunId]);
+    expect(await heartbeat.getAgentRunHold(ids.agentId)).toBeNull();
+    // Not a scheduled retry: Slack settlement refuses runs that carry one.
+    const [resumed] = await db.select({ scheduledRetryAt: heartbeatRuns.scheduledRetryAt }).from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, firstRunId));
+    expect(resumed?.scheduledRetryAt).toBeNull();
+  });
+
   it("holds a later automatic retry that inherited an earlier Retry now", async () => {
     const ids = await insertAgent();
     await insertFinishedRun(ids, new Date(Date.now() - 60_000), quotaStop(new Date(Date.now() + HOUR_MS)));
