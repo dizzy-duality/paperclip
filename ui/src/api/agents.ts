@@ -104,6 +104,13 @@ function withCompanyScope(path: string, companyId?: string) {
   return `${path}${separator}companyId=${encodeURIComponent(companyId)}`;
 }
 
+/** Why an agent's automatic runs stay queued; see GET /agents/:id/run-hold. */
+export interface AgentRunHold {
+  reason: "provider_quota" | "off_hours";
+  until: string | null;
+  heldRuns: number;
+}
+
 function agentPath(id: string, companyId?: string, suffix = "") {
   return withCompanyScope(`/agents/${encodeURIComponent(id)}${suffix}`, companyId);
 }
@@ -217,6 +224,11 @@ export const agentsApi = {
     api.post<AgentKeyCreated>(agentPath(id, companyId, "/keys"), { name, ...(scope ? { scope } : {}) }),
   revokeKey: (agentId: string, keyId: string, companyId?: string) =>
     api.delete<{ ok: true }>(agentPath(agentId, companyId, `/keys/${encodeURIComponent(keyId)}`)),
+  runHold: (id: string, companyId?: string) =>
+    api.get<{ hold: AgentRunHold | null }>(agentPath(id, companyId, "/run-hold")),
+  resumeRunHold: (id: string, companyId?: string) =>
+    api.post<{ outcome: "started" | "requested" | "no_held_run"; runId: string | null }>(
+      agentPath(id, companyId, "/run-hold/resume"), {}),
   runtimeState: (id: string, companyId?: string) =>
     api.get<AgentRuntimeState>(agentPath(id, companyId, "/runtime-state")),
   taskSessions: (id: string, companyId?: string) =>

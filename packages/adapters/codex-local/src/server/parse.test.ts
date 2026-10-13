@@ -235,6 +235,25 @@ describe("isCodexTransientUpstreamError", () => {
     expect(extractCodexRetryNotBefore({ stdout }, now)?.getTime()).toBe(new Date(2026, 9, 8, 8, 29, 0, 0).getTime());
   });
 
+  it("reads quota only from codex's own error events, not from the agent's transcript", () => {
+    const limit = "You've hit your usage limit. Upgrade to Pro or try again at 8:29 AM.";
+    const transcript = [
+      { type: "thread.started", thread_id: "t1" },
+      { type: "item.completed", item: { type: "command_execution", aggregated_output: limit } },
+      { type: "item.completed", item: { type: "agent_message", text: "The model is at capacity limit, waiting." } },
+    ].map((event) => JSON.stringify(event));
+    const now = new Date(2026, 9, 8, 7, 41, 0);
+
+    expect(isCodexProviderQuotaError({ stdout: transcript.join("\n") })).toBe(false);
+    expect(extractCodexRetryNotBefore({ stdout: transcript.join("\n") }, now)).toBeNull();
+
+    const failed = [...transcript, JSON.stringify({ type: "turn.failed", error: { message: limit } })];
+    expect(isCodexProviderQuotaError({ stdout: failed.join("\n") })).toBe(true);
+    expect(extractCodexRetryNotBefore({ stdout: failed.join("\n") }, now)?.getTime()).toBe(
+      new Date(2026, 9, 8, 8, 29, 0, 0).getTime(),
+    );
+  });
+
   it("keeps the timezone hint after a dotted meridiem", () => {
     const errorMessage = "You've hit your usage limit. Try again at 8:29 a.m. (America/Chicago).";
     const now = new Date("2026-10-08T10:00:00.000Z");

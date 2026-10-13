@@ -3594,6 +3594,24 @@ registry.registerPath({
 });
 
 registry.registerPath({
+  method: "get",
+  path: "/api/agents/{id}/run-hold",
+  tags: ["agents"],
+  summary: "Why the agent's automatic runs stay queued (provider usage limit or active hours)",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/agents/{id}/run-hold/resume",
+  tags: ["agents"],
+  summary: "Start the agent's oldest held run now",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
   method: "post",
   path: "/api/agents/{id}/runtime-state/reset-session",
   tags: ["agents"],

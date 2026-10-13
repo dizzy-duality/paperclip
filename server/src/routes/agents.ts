@@ -4417,6 +4417,35 @@ export function agentRoutes(
     res.json(state);
   });
 
+  router.get("/agents/:id/run-hold", async (req, res) => {
+    const id = req.params.id as string;
+    const agent = await getAccessibleAgent(req, res, id);
+    if (!agent) return;
+    res.json({ hold: await heartbeat.getAgentRunHold(id) });
+  });
+
+  router.post("/agents/:id/run-hold/resume", async (req, res) => {
+    assertBoard(req);
+    const id = req.params.id as string;
+    const agent = await getAccessibleAgent(req, res, id);
+    if (!agent) return;
+    await assertBoardCanManageAgentsForCompany(req, agent.companyId);
+
+    const result = await heartbeat.resumeHeldRun(id);
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId: agent.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      action: "agent.run_hold_resumed",
+      entityType: "agent",
+      entityId: agent.id,
+      runId: result.runId,
+      details: { outcome: result.outcome },
+    });
+    res.json(result);
+  });
+
   router.get("/agents/:id/task-sessions", async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
