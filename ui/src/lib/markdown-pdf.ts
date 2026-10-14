@@ -22,7 +22,8 @@ function inline(nodes: PhrasingContent[]): Run[] {
       case "inlineCode": return [{ text: node.value, style: "code" }];
       case "break": return [{ text: "\n" }];
       case "link": return styled(node.children, { link: node.url, color: "#2563eb", decoration: "underline" });
-      case "image": return node.alt ? [{ text: `[${node.alt}]` }] : [];
+      case "image":
+      case "imageReference": return node.alt ? [{ text: `[${node.alt}]` }] : [];
       case "footnoteReference": return [{ text: `[${node.label ?? node.identifier}]`, sup: true }];
       case "html": return [{ text: node.value }];
       default: return "children" in node ? inline(node.children as PhrasingContent[]) : [];
