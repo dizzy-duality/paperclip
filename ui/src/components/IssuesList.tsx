@@ -935,6 +935,13 @@ function StreamlinedIssuesList({
     [companyMembers?.users],
   );
 
+  // Same label the list row's assignee cell shows for an operator.
+  const userAssignee = useCallback((userId: string) => ({
+    name: formatAssigneeUserLabel(userId, currentUserId, companyUserLabelMap)
+      ?? companyUserProfileMap.get(userId)?.label ?? "User",
+    avatarUrl: companyUserProfileMap.get(userId)?.image ?? null,
+  }), [companyUserLabelMap, companyUserProfileMap, currentUserId]);
+
   const projectById = useMemo(() => {
     const map = new Map<string, { name: string; color: string | null }>();
     for (const project of projects ?? []) {
@@ -1997,6 +2004,7 @@ function StreamlinedIssuesList({
         <KanbanBoard
           issues={filtered}
           agents={agents}
+          userAssignee={userAssignee}
           liveIssueIds={liveIssueIds}
           compactCards={boardCompactCards}
           collapsedStatuses={boardCollapsedStatuses}
