@@ -17,7 +17,7 @@ import {
   shouldBlurPageSearchOnEnter,
   shouldBlurPageSearchOnEscape,
 } from "../lib/keyboardShortcuts";
-import { formatAssigneeUserLabel } from "../lib/assignees";
+import { formatAssigneeUserLabel, userAssigneeLookup } from "../lib/assignees";
 import { buildCompanyUserLabelMap, buildCompanyUserProfileMap } from "../lib/company-members";
 import { createIssueDetailPath, rememberIssueDetailLocationState, withIssueDetailHeaderSeed } from "../lib/issueDetailBreadcrumb";
 import { prefetchIssueDetailForNavigation } from "../lib/issueDetailCache";
@@ -887,6 +887,11 @@ export function IssuesList({
   const companyUserProfileMap = useMemo(
     () => buildCompanyUserProfileMap(companyMembers?.users),
     [companyMembers?.users],
+  );
+
+  const userAssignee = useMemo(
+    () => userAssigneeLookup(currentUserId, companyUserLabelMap, companyUserProfileMap),
+    [companyUserLabelMap, companyUserProfileMap, currentUserId],
   );
 
   const projectById = useMemo(() => {
@@ -1929,6 +1934,7 @@ export function IssuesList({
         <KanbanBoard
           issues={filtered}
           agents={agents}
+          userAssignee={userAssignee}
           liveIssueIds={liveIssueIds}
           compactCards={boardCompactCards}
           collapsedStatuses={boardCollapsedStatuses}
