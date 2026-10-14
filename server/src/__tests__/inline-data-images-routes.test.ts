@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import express from "express";
 import { eq, sql } from "drizzle-orm";
 import request from "supertest";
@@ -38,7 +38,7 @@ describeEmbeddedPostgres("inline data images in task text", () => {
         objectKey: `${input.namespace}/${randomUUID()}`,
         contentType: input.contentType,
         byteSize: input.body.length,
-        sha256: "test",
+        sha256: createHash("sha256").update(input.body).digest("hex"),
         originalFilename: input.originalFilename,
       };
     }),
@@ -63,9 +63,11 @@ describeEmbeddedPostgres("inline data images in task text", () => {
 
   it("stores pasted images as company assets and links them from the description and comments", async () => {
     const companyId = randomUUID();
-    await db.insert(companies).values({
-      id: companyId, name: "Inline Co", status: "active", issuePrefix: "INL", requireBoardApprovalForNewAgents: false,
-    });
+    const otherCompanyId = randomUUID();
+    await db.insert(companies).values([
+      { id: companyId, name: "Inline Co", status: "active", issuePrefix: "INL", requireBoardApprovalForNewAgents: false },
+      { id: otherCompanyId, name: "Other Co", status: "active", issuePrefix: "OTH", requireBoardApprovalForNewAgents: false },
+    ]);
     const app = express();
     app.use(express.json({ limit: "10mb" }));
     app.use((req, _res, next) => {
@@ -81,8 +83,28 @@ describeEmbeddedPostgres("inline data images in task text", () => {
     const issueId = created.body.id as string;
     const patched = await request(app).patch(`/api/issues/${issueId}`).send({ description: inline("Edited") });
     expect(patched.status).toBe(200);
-    const commented = await request(app).post(`/api/issues/${issueId}/comments`).send({ body: inline("Comment") });
+    const clientRequestId = randomUUID();
+    const commented = await request(app).post(`/api/issues/${issueId}/comments`)
+      .send({ body: inline("Comment"), clientRequestId });
     expect(commented.status).toBe(201);
+    // A retry yields the same text, so it returns the first comment instead of a 409.
+    const retried = await request(app).post(`/api/issues/${issueId}/comments`)
+      .send({ body: inline("Comment"), clientRequestId });
+    expect(retried.body.id).toBe(commented.body.id);
+
+    // Another company's task answers 404, as it does without an image.
+    const [foreign] = await db.insert(issues).values({ companyId: otherCompanyId, title: "Foreign" })
+      .returning({ id: issues.id });
+    const sessionApp = express();
+    sessionApp.use(express.json({ limit: "10mb" }));
+    sessionApp.use((req, _res, next) => {
+      req.actor = { type: "board", userId: "member", source: "session", companyIds: [companyId] };
+      next();
+    });
+    sessionApp.use("/api", issueRoutes(db, storage));
+    sessionApp.use(errorHandler);
+    const foreignPatch = await request(sessionApp).patch(`/api/issues/${foreign!.id}`).send({ description: inline("Probe") });
+    expect(foreignPatch.status).toBe(404);
 
     const [issue] = await db.select({ description: issues.description }).from(issues).where(eq(issues.id, issueId));
     const [comment] = await db.select({ body: issueComments.body }).from(issueComments)
@@ -90,8 +112,9 @@ describeEmbeddedPostgres("inline data images in task text", () => {
     const assetIds = (await db.select({ id: assets.id }).from(assets).where(eq(assets.companyId, companyId)))
       .map((row) => row.id);
 
-    expect(assetIds).toHaveLength(3);
-    expect(stored).toEqual([PNG, PNG, PNG]);
+    // The same image every time: stored once, one asset.
+    expect(assetIds).toHaveLength(1);
+    expect(stored).toEqual([PNG]);
     for (const text of [issue!.description!, comment!.body]) {
       expect(text).not.toContain("data:image");
       const [, id] = text.match(/!\[shot\]\(\/api\/assets\/([0-9a-f-]+)\/content\)/) ?? [];
