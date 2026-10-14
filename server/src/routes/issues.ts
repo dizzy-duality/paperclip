@@ -4374,9 +4374,14 @@ export function issueRoutes(
       });
       if (fields.length === 0) return next();
       const companyId = await resolveCompanyId(req);
-      // An unknown issue is the handler's 404 to give.
+      // An unknown or inaccessible issue is the handler's to refuse, with the
+      // same response either way.
       if (!companyId) return next();
-      assertCompanyAccess(req, companyId);
+      try {
+        assertCompanyAccess(req, companyId);
+      } catch {
+        return next();
+      }
       const store = inlineImageAssetStore(db, storage, companyId, getActorInfo(req));
       for (const field of fields) {
         body![field] = (await externalizeInlineDataImages(body![field] as string, store)).text;
