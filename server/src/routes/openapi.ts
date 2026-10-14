@@ -9577,6 +9577,15 @@ registerCurrentRoute({
 
 registry.registerPath({
   method: "get",
+  path: "/api/issues/{id}/documents/{key}/download",
+  tags: ["issues"],
+  summary: "Download an issue document as a Markdown file",
+  request: { params: z.object({ id: z.string(), key: z.string() }) },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "get",
   path: "/api/companies/import/jobs/{jobId}",
   tags: ["companies"],
   summary: "Get company import job status",

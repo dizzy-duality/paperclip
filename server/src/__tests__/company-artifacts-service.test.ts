@@ -25,6 +25,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { errorHandler } from "../middleware/index.js";
 import { companyRoutes } from "../routes/companies.js";
+import { issueRoutes } from "../routes/issues.js";
 import { companyArtifactsService } from "../services/company-artifacts.js";
 import type { StorageService } from "../storage/types.js";
 
@@ -457,6 +458,26 @@ describeEmbeddedPostgres("companyArtifactsService", () => {
     expect(result.artifacts.some((artifact) => artifact.title === "operator-screenshot.png")).toBe(false);
     expect(result.artifacts.some((artifact) => artifact.title === "comment-screenshot.png")).toBe(false);
     expect(result.artifacts.some((artifact) => artifact.issue.identifier === "OTH-1")).toBe(false);
+  });
+
+  it("gives documents a download link that serves the Markdown", async () => {
+    const { companyId } = await seedArtifacts();
+    const result = await companyArtifactsService(db, createStorageService()).list(companyId, { limit: 20 });
+    const review = result.artifacts.find((artifact) => artifact.title === "Review Notes");
+
+    const app = express();
+    app.use((req, _res, next) => {
+      req.actor = { type: "board", userId: "local-board", source: "local_implicit", companyIds: [companyId] };
+      next();
+    });
+    app.use("/api", issueRoutes(db, createStorageService()));
+    app.use(errorHandler);
+
+    const response = await request(app).get(review!.downloadPath!);
+    expect(response.status).toBe(200);
+    expect(response.headers["content-type"]).toMatch(/^text\/markdown/);
+    expect(response.headers["content-disposition"]).toBe('attachment; filename="review.md"');
+    expect(response.text).toBe("# Review\n\nAgent-created review document with useful details.");
   });
 
   it("supports project, kind, search, and cursor filters", async () => {
