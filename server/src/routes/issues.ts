@@ -9757,6 +9757,36 @@ export function issueRoutes(
     res.json({ ...doc, annotations });
   });
 
+  // The document as a Markdown file, for the Artifacts page download button.
+  router.get("/issues/:id/documents/:key/download", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await getAccessibleResource(
+      req,
+      res,
+      getIssueById(req, id),
+      "Issue not found",
+    );
+    if (!issue) return;
+    if (!(await assertIssueReadAllowed(req, res, issue))) return;
+    const keyParsed = issueDocumentKeySchema.safeParse(
+      String(req.params.key ?? "")
+        .trim()
+        .toLowerCase(),
+    );
+    if (!keyParsed.success) {
+      res.status(400).json({ error: "Invalid document key" });
+      return;
+    }
+    const doc = await documentsSvc.getIssueDocumentByKey(issue.id, keyParsed.data);
+    if (!doc) {
+      res.status(404).json({ error: "Document not found" });
+      return;
+    }
+    res.attachment(`${keyParsed.data}.md`);
+    res.type("text/markdown; charset=utf-8");
+    res.send(doc.body ?? "");
+  });
+
   router.get("/issues/:id/documents/:key/annotations", async (req, res) => {
     const id = req.params.id as string;
     const issue = await getAccessibleResource(

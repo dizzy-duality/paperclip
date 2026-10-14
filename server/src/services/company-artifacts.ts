@@ -460,7 +460,7 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
             contentType: "text/markdown",
             contentPath: null,
             openPath: null,
-            downloadPath: null,
+            downloadPath: `/api/issues/${row.issueId}/documents/${encodeURIComponent(row.key)}/download`,
             issue: { id: row.issueId, identifier, title: row.issueTitle },
             project: row.projectId && row.projectName ? { id: row.projectId, name: row.projectName } : null,
             createdByAgent: row.createdByAgentId && row.createdByAgentName
