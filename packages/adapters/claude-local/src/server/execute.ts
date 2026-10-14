@@ -78,6 +78,7 @@ import {
   isClaudeUnknownSessionError,
   isClaudePoisonedPreviousMessageIdError,
   isClaudeImageProcessingError,
+  isClaudePromptTooLongError,
   isClaudeModelNotFoundError,
 } from "./parse.js";
 import {
@@ -1149,6 +1150,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       (asString(parsed.session_id, opts.fallbackSessionId ?? "") || opts.fallbackSessionId);
     const clearSessionForMaxTurns = isClaudeMaxTurnsResult(parsed);
     const poisonedPreviousMessageId = isClaudePoisonedPreviousMessageIdError(parsed);
+    const promptTooLong = isClaudePromptTooLongError(parsed);
     // Fable 5 policy refusals exit cleanly (exitCode=0, is_error=false), so this
     // is intentionally independent of `failed` — otherwise a refusal looks like a
     // successful run to Paperclip and the heartbeat stalls silently. See RY-604.
@@ -1164,7 +1166,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     // /v1/messages and the issue is permanently unrecoverable until the
     // sessionId is dropped server-side. Drop here so resolveNextSessionState
     // calls clearTaskSessions on the next heartbeat. See RED-978 / RED-976.
-    const shouldDropSessionForPoison = poisonedPreviousMessageId;
+    // A session too large to resume fails the same way on every later run.
+    const shouldDropSessionForPoison = poisonedPreviousMessageId || (failed && promptTooLong);
     const resolvedSessionId = shouldDropSessionForPoison ? null : rawResolvedSessionId;
     const resolvedSessionParams = resolvedSessionId
       ? ({
@@ -1241,6 +1244,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ? "max_turns_exhausted"
       : failed && poisonedPreviousMessageId
       ? "claude_poisoned_previous_message_id"
+      : failed && promptTooLong
+      ? "claude_prompt_too_long"
       : providerQuota
       ? "provider_quota"
       : transientUpstream
@@ -1259,6 +1264,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ...parsed,
       ...(failed && clearSessionForMaxTurns ? { stopReason: "max_turns_exhausted" } : {}),
       ...(failed && poisonedPreviousMessageId ? { stopReason: "claude_poisoned_previous_message_id" } : {}),
+      ...(failed && promptTooLong ? { stopReason: "claude_prompt_too_long" } : {}),
       ...(claudeRefusal ? { stopReason: "refusal", errorFamily: "model_refusal" } : {}),
       ...(errorFamily ? { errorFamily } : {}),
       ...(transientRetryNotBefore ? { retryNotBefore: transientRetryNotBefore.toISOString() } : {}),
@@ -1296,6 +1302,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         // state error. Force the server to drop persisted session state for
         // this issue so the next continuation starts from a clean slate.
         poisonedPreviousMessageId ||
+        (failed && promptTooLong) ||
         Boolean(opts.clearSessionOnMissingSession && !resolvedSessionId),
     };
   };
@@ -1387,6 +1394,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           ? "poisoned"
           : isClaudeImageProcessingError(initial.parsed)
           ? "image"
+          : isClaudePromptTooLongError(initial.parsed)
+          ? "too_long"
           : null
         : null;
 
@@ -1396,6 +1405,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           ? "returned a poisoned message-id"
           : sessionErrorKind === "image"
           ? "contains an unprocessable image"
+          : sessionErrorKind === "too_long"
+          ? "is too long to resume"
           : "is unavailable";
       await onLog(
         "stdout",
