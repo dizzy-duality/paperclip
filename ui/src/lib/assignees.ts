@@ -95,3 +95,18 @@ export function formatUserLabel(
   if (userId === "local-board") return "Board";
   return userId.slice(0, 5);
 }
+
+/**
+ * Name and avatar for an operator (user) assignee: the label the list view's
+ * assignee cell shows, falling back to the member profile.
+ */
+export function userAssigneeLookup(
+  currentUserId: string | null | undefined,
+  userLabels: ReadonlyMap<string, string>,
+  profiles: ReadonlyMap<string, { label: string; image: string | null }>,
+) {
+  return (userId: string) => ({
+    name: formatAssigneeUserLabel(userId, currentUserId, userLabels) ?? profiles.get(userId)?.label ?? "User",
+    avatarUrl: profiles.get(userId)?.image ?? null,
+  });
+}

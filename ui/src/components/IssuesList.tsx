@@ -17,7 +17,7 @@ import {
   shouldBlurPageSearchOnEnter,
   shouldBlurPageSearchOnEscape,
 } from "../lib/keyboardShortcuts";
-import { formatAssigneeUserLabel } from "../lib/assignees";
+import { formatAssigneeUserLabel, userAssigneeLookup } from "../lib/assignees";
 import { buildCompanyUserLabelMap, buildCompanyUserProfileMap } from "../lib/company-members";
 import { createIssueDetailPath, rememberIssueDetailLocationState, withIssueDetailHeaderSeed } from "../lib/issueDetailBreadcrumb";
 import { prefetchIssueDetailForNavigation } from "../lib/issueDetailCache";
@@ -935,12 +935,10 @@ function StreamlinedIssuesList({
     [companyMembers?.users],
   );
 
-  // Same label the list row's assignee cell shows for an operator.
-  const userAssignee = useCallback((userId: string) => ({
-    name: formatAssigneeUserLabel(userId, currentUserId, companyUserLabelMap)
-      ?? companyUserProfileMap.get(userId)?.label ?? "User",
-    avatarUrl: companyUserProfileMap.get(userId)?.image ?? null,
-  }), [companyUserLabelMap, companyUserProfileMap, currentUserId]);
+  const userAssignee = useMemo(
+    () => userAssigneeLookup(currentUserId, companyUserLabelMap, companyUserProfileMap),
+    [companyUserLabelMap, companyUserProfileMap, currentUserId],
+  );
 
   const projectById = useMemo(() => {
     const map = new Map<string, { name: string; color: string | null }>();
