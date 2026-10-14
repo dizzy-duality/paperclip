@@ -21,7 +21,12 @@ import {
   rejectSteeredIdentity,
 } from "../services/run-identity.js";
 import { createHash, randomUUID } from "node:crypto";
-import { Router, type Request, type Response } from "express";
+import { Router, type NextFunction, type Request, type Response } from "express";
+import {
+  externalizeInlineDataImages,
+  hasInlineDataImage,
+  inlineImageAssetStore,
+} from "../services/inline-data-images.js";
 import multer from "multer";
 import { z } from "zod";
 import {
@@ -3463,6 +3468,9 @@ function logIssueListRequest(input: {
   });
 }
 
+// Text fields an issue write may carry; each can hold pasted base64 images.
+const INLINE_IMAGE_TEXT_FIELDS = ["description", "body", "comment"] as const;
+
 export function issueRoutes(
   db: Db,
   storage: StorageService,
@@ -4351,6 +4359,39 @@ export function issueRoutes(
       return input.activeRecoveryAction ?? null;
     }
   }
+
+  /**
+   * Moves base64 `data:` images out of a task's description or a comment into
+   * company image assets before the write handler runs, so the stored text
+   * links to them instead of carrying them.
+   */
+  function externalizeInlineImages(resolveCompanyId: (req: Request) => Promise<string | null>) {
+    return async (req: Request, _res: Response, next: NextFunction) => {
+      const body = req.body as Record<string, unknown> | undefined;
+      const fields = INLINE_IMAGE_TEXT_FIELDS.filter((field) => {
+        const value = body?.[field];
+        return typeof value === "string" && hasInlineDataImage(value);
+      });
+      if (fields.length === 0) return next();
+      const companyId = await resolveCompanyId(req);
+      // An unknown or inaccessible issue is the handler's to refuse, with the
+      // same response either way.
+      if (!companyId) return next();
+      try {
+        assertCompanyAccess(req, companyId);
+      } catch {
+        return next();
+      }
+      const store = inlineImageAssetStore(db, storage, companyId, getActorInfo(req));
+      for (const field of fields) {
+        body![field] = (await externalizeInlineDataImages(body![field] as string, store)).text;
+      }
+      next();
+    };
+  }
+  const companyIdFromParams = async (req: Request) => req.params.companyId as string;
+  const companyIdOfIssue = async (req: Request) =>
+    (await svc.getById(req.params.id as string))?.companyId ?? null;
 
   function withContentPath<T extends { id: string }>(attachment: T) {
     const contentPath = `/api/attachments/${attachment.id}/content`;
@@ -11545,6 +11586,7 @@ export function issueRoutes(
     "/companies/:companyId/issues",
     applyCreateIssueStatusDefault,
     validateIssueMutationBody(createIssueSchema),
+    externalizeInlineImages(companyIdFromParams),
     async (req, res) => {
       const companyId = req.params.companyId as string;
       assertCompanyAccess(req, companyId);
@@ -12757,6 +12799,7 @@ export function issueRoutes(
   router.patch(
     "/issues/:id",
     validateIssueMutationBody(updateIssueRouteSchema),
+    externalizeInlineImages(companyIdOfIssue),
     async (req, res) => {
       const id = req.params.id as string;
       const existing = await getAccessibleResource(
@@ -17239,6 +17282,7 @@ export function issueRoutes(
   router.post(
     "/issues/:id/comments",
     validate(addIssueCommentSchema),
+    externalizeInlineImages(companyIdOfIssue),
     async (req, res) => {
       const id = req.params.id as string;
       const issue = await getAccessibleResource(
