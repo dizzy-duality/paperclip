@@ -6,7 +6,7 @@ import { gfm } from "micromark-extension-gfm";
 
 // pdfmake flat text runs. A style set on a run whose text is itself an array
 // is not applied to the nested runs, so styles are pushed down onto each leaf.
-type Run = { text: string; bold?: boolean; italics?: boolean; decoration?: "lineThrough" | "underline"; link?: string; style?: string; color?: string };
+type Run = { text: string; sup?: boolean; bold?: boolean; italics?: boolean; decoration?: "lineThrough" | "underline"; link?: string; style?: string; color?: string };
 
 function styled(nodes: PhrasingContent[], style: Omit<Run, "text">): Run[] {
   return inline(nodes).map((run) => ({ ...style, ...run }));
@@ -23,6 +23,7 @@ function inline(nodes: PhrasingContent[]): Run[] {
       case "break": return [{ text: "\n" }];
       case "link": return styled(node.children, { link: node.url, color: "#2563eb", decoration: "underline" });
       case "image": return node.alt ? [{ text: `[${node.alt}]` }] : [];
+      case "footnoteReference": return [{ text: `[${node.label ?? node.identifier}]`, sup: true }];
       case "html": return [{ text: node.value }];
       default: return "children" in node ? inline(node.children as PhrasingContent[]) : [];
     }
@@ -60,6 +61,15 @@ function block(node: RootContent): Content | null {
         : { ul: items, margin: [0, 0, 0, 6] };
     }
     case "html": return { text: node.value, margin: [0, 0, 0, 6] };
+    // Rendered where the Markdown defines it, as "[label] text", in small type.
+    case "footnoteDefinition": {
+      const [first, ...rest] = node.children;
+      const marker = { text: `[${node.label ?? node.identifier}] ` };
+      const lead: Content[] = first?.type === "paragraph"
+        ? [{ text: [marker, ...inline(first.children)], margin: [0, 0, 0, 3] }, ...blocks(rest)]
+        : [{ text: [marker] }, ...blocks(node.children)];
+      return { stack: lead, fontSize: 9, margin: [0, 2, 0, 4] };
+    }
     default: return null;
   }
 }
