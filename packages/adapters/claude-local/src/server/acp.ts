@@ -85,7 +85,9 @@ function normalizeEngine(value: unknown): ClaudeEngineSelection {
   const raw = typeof value === "string" ? value.trim().toLowerCase() : "";
   if (raw === "acp") return { engine: "acp", explicit: true };
   if (raw === "cli") return { engine: "cli", explicit: true };
-  return { engine: "acp", explicit: false };
+  // dd: our agent images ship no ACP agent, so an agent that names no engine
+  // runs the CLI. Upstream defaults to ACP.
+  return { engine: "cli", explicit: false };
 }
 
 export function resolveClaudeExecutionEngine(config: Record<string, unknown>): ClaudeEngineSelection {

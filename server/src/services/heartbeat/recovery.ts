@@ -452,9 +452,9 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
     ) {
       return false;
     }
-    return (
-      readNonEmptyString(parseObject(input.adapterConfig).engine) !== "cli"
-    );
+    const engine = readNonEmptyString(parseObject(input.adapterConfig).engine);
+    // dd: Claude and Codex agents without an engine run the CLI (see their acp.ts).
+    return input.adapterType === "gemini_local" ? engine !== "cli" : engine === "acp";
   }
 
   async function prepareHotRestartShutdown(

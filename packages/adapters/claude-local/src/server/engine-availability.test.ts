@@ -7,7 +7,7 @@ const originalVersion = process.version;
 afterEach(() => Object.defineProperty(process, "version", { value: originalVersion }));
 
 describe("claude engine availability", () => {
-  it.each([undefined, "auto", "acp"])("reports a setup failure for engine=%s without starting a process", async (engine) => {
+  it.each(["acp"])("reports a setup failure for engine=%s without starting a process", async (engine) => {
     Object.defineProperty(process, "version", { value: "v18.0.0" });
     const config = { engine };
     const onSpawn = vi.fn();
@@ -27,6 +27,13 @@ describe("claude engine availability", () => {
     }));
   });
 
+  // dd: an agent that names no engine runs the CLI (our images ship no ACP agent).
+  it.each([undefined, "auto"])("runs the CLI for engine=%s, without ACP prerequisites", async (engine) => {
+    Object.defineProperty(process, "version", { value: "v18.0.0" });
+    await expect(resolveClaudeExecutionEngineForRun({ config: { engine } }))
+      .resolves.toEqual({ engine: "cli", explicit: false });
+  });
+
   it("does not apply ACP prerequisites to explicitly selected CLI", async () => {
     Object.defineProperty(process, "version", { value: "v18.0.0" });
     await expect(resolveClaudeExecutionEngineForRun({ config: { engine: "cli" } }))
@@ -36,7 +43,7 @@ describe("claude engine availability", () => {
   it("keeps an unavailable ACP command as a failure, not a CLI selection", async () => {
     Object.defineProperty(process, "version", { value: "v24.11.0" });
     const result = await resolveClaudeExecutionEngineForRun({
-      config: { agentCommand: "/nonexistent/paperclip-test/acp", command: "/nonexistent/paperclip-test/acp" },
+      config: { engine: "acp", agentCommand: "/nonexistent/paperclip-test/acp", command: "/nonexistent/paperclip-test/acp" },
     });
     expect(result.engine).toBe("acp");
     expect(result.unavailableReason).toContain("not available");
