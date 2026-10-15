@@ -49,6 +49,11 @@
       "key": "mcp-key",
       "transport": "mcp_remote",
       "auth": "api_key",
+      "grantKinds": [
+        "user",
+        "agent",
+        "organization"
+      ],
       "ownershipModes": [
         "customer"
       ],

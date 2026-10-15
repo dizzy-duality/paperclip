@@ -331,6 +331,20 @@ export function isClaudePoisonedPreviousMessageIdError(parsed: Record<string, un
   );
 }
 
+/**
+ * The CLI refused to send the request because the prompt exceeds the model's
+ * context window. On a resumed session this repeats on every later run until
+ * the session is dropped.
+ */
+export function isClaudePromptTooLongError(parsed: Record<string, unknown>): boolean {
+  const resultText = asString(parsed.result, "").trim();
+  const allMessages = [resultText, ...extractClaudeErrorMessages(parsed)]
+    .map((msg) => msg.trim())
+    .filter(Boolean);
+
+  return allMessages.some((msg) => /prompt is too long/i.test(msg));
+}
+
 export function isClaudeImageProcessingError(parsed: Record<string, unknown>): boolean {
   const resultText = asString(parsed.result, "").trim();
   const allMessages = [resultText, ...extractClaudeErrorMessages(parsed)]

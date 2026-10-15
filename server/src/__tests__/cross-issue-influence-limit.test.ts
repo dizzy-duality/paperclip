@@ -22,6 +22,10 @@ function counterDb(
               then: (resolve: (rows: unknown[]) => unknown) => resolve([{ count: observedCount }]),
             };
           }
+          // The target issue lookup for a run without a source issue: not checked out.
+          if (Object.keys(selection).includes("checkoutRunId")) {
+            return { then: (resolve: (rows: unknown[]) => unknown) => resolve([]) };
+          }
           return {
             for: () => ({
               then: (resolve: (rows: unknown[]) => unknown) => resolve(runOverrides === null ? [] : [{

@@ -213,6 +213,60 @@ describe("isCodexTransientUpstreamError", () => {
     );
   });
 
+  it("extracts the retry time from the subscription usage-limit wording", () => {
+    // As codex printed it on 2026-10-08 (ChatGPT subscription, no model named).
+    const errorMessage =
+      "You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit " +
+      "https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 8:29 AM.";
+    const now = new Date(2026, 9, 8, 7, 41, 0);
+
+    expect(isCodexProviderQuotaError({ errorMessage })).toBe(true);
+    expect(extractCodexRetryNotBefore({ errorMessage }, now)?.getTime()).toBe(
+      new Date(2026, 9, 8, 8, 29, 0, 0).getTime(),
+    );
+  });
+
+  it("reads the retry time from JSON-quoted output", () => {
+    const stdout = JSON.stringify({
+      message: "You've hit your usage limit for GPT-5.3-Codex-Spark. Switch to another model now, or try again at 8:29 AM.",
+    });
+    const now = new Date(2026, 9, 8, 7, 41, 0);
+
+    expect(extractCodexRetryNotBefore({ stdout }, now)?.getTime()).toBe(new Date(2026, 9, 8, 8, 29, 0, 0).getTime());
+  });
+
+  it("reads quota only from codex's own error events, not from the agent's transcript", () => {
+    const limit = "You've hit your usage limit. Upgrade to Pro or try again at 8:29 AM.";
+    const transcript = [
+      { type: "thread.started", thread_id: "t1" },
+      { type: "item.completed", item: { type: "command_execution", aggregated_output: limit } },
+      { type: "item.completed", item: { type: "agent_message", text: "The model is at capacity limit, waiting." } },
+    ].map((event) => JSON.stringify(event));
+    const now = new Date(2026, 9, 8, 7, 41, 0);
+
+    expect(isCodexProviderQuotaError({ stdout: transcript.join("\n") })).toBe(false);
+    expect(extractCodexRetryNotBefore({ stdout: transcript.join("\n") }, now)).toBeNull();
+
+    const failed = [...transcript, JSON.stringify({ type: "turn.failed", error: { message: limit } })];
+    expect(isCodexProviderQuotaError({ stdout: failed.join("\n") })).toBe(true);
+    expect(extractCodexRetryNotBefore({ stdout: failed.join("\n") }, now)?.getTime()).toBe(
+      new Date(2026, 9, 8, 8, 29, 0, 0).getTime(),
+    );
+  });
+
+  it("keeps the timezone hint after a dotted meridiem", () => {
+    const errorMessage = "You've hit your usage limit. Try again at 8:29 a.m. (America/Chicago).";
+    const now = new Date("2026-10-08T10:00:00.000Z");
+
+    expect(extractCodexRetryNotBefore({ errorMessage }, now)?.toISOString()).toBe("2026-10-08T13:29:00.000Z");
+  });
+
+  it("does not take a retry time from the next line", () => {
+    const errorMessage = "You've hit your usage limit. try again at\n8:29 AM.";
+
+    expect(extractCodexRetryNotBefore({ errorMessage })).toBeNull();
+  });
+
   it("classifies model-capacity messages as provider quota without reset metadata", () => {
     const errorMessage = "The requested model is at capacity. Please try again later.";
 

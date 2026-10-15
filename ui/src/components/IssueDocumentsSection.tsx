@@ -35,7 +35,8 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Check, Copy, Diff, Download, FilePenLine, FileText, Lock, MoreHorizontal, Plus, Trash2, Unlock, X } from "lucide-react";
+import { Check, Copy, Diff, Download, FileDown, FilePenLine, FileText, Lock, MoreHorizontal, Plus, Trash2, Unlock, X } from "lucide-react";
+import { downloadMarkdownAsPdf } from "@/lib/markdown-pdf";
 import { DocumentDiffModal } from "./DocumentDiffModal";
 import { DocumentFrameHeader, type DocumentFrameHeaderRevisionActor } from "./DocumentFrameHeader";
 import { SourceTrustBadge } from "./SourceTrustBadge";
@@ -1119,7 +1120,13 @@ export function IssueDocumentsSection({
                           onClick={() => downloadDocumentFile(doc.key, displayedBody)}
                         >
                           <Download className="h-3.5 w-3.5" />
-                          Download document
+                          Download Markdown
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          onClick={() => void downloadMarkdownAsPdf(doc.title ?? doc.key, displayedBody, doc.title ?? doc.key)}
+                        >
+                          <FileDown className="h-3.5 w-3.5" />
+                          Download PDF
                         </DropdownMenuItem>
                         {doc.latestRevisionNumber > 1 ? (
                           <DropdownMenuItem onClick={() => setDiffViewKey(doc.key)}>

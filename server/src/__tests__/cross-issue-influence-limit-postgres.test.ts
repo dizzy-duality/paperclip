@@ -7,6 +7,7 @@ import {
   companies,
   createDb,
   heartbeatRuns,
+  issues,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -31,6 +32,7 @@ describeEmbeddedPostgres("cross-issue influence limit PostgreSQL serialization",
 
   afterEach(async () => {
     await db.delete(activityLog);
+    await db.delete(issues);
     await db.delete(heartbeatRuns);
     await db.delete(agents);
     await db.delete(companies);
@@ -112,5 +114,51 @@ describeEmbeddedPostgres("cross-issue influence limit PostgreSQL serialization",
       .where(and(eq(activityLog.companyId, companyId), eq(activityLog.runId, runId)));
     expect(recorded.filter((row) => row.action === "issue.cross_issue_influence_observed")).toHaveLength(20);
     expect(recorded.filter((row) => row.action === "issue.cross_issue_influence_cap_rejected")).toHaveLength(1);
+  });
+
+  it("lets a run without a source issue write, within the cap, only to the issue it checked out", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const timerRunId = randomUUID();
+    const otherRunId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+    });
+    await db.insert(agents).values({
+      id: agentId, companyId, name: "Timer Coder", role: "engineer",
+      adapterType: "claude_local", adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    });
+    // A timer heartbeat: no issueId or taskId in its context.
+    await db.insert(heartbeatRuns).values([
+      { id: timerRunId, companyId, agentId, status: "running", contextSnapshot: { source: "heartbeat_timer" } },
+      { id: otherRunId, companyId, agentId, status: "running", contextSnapshot: {} },
+    ]);
+    const [own, othersCheckout, unchecked] = [randomUUID(), randomUUID(), randomUUID()];
+    await db.insert(issues).values([
+      { id: own, companyId, title: "Checked out by the timer run", checkoutRunId: timerRunId },
+      { id: othersCheckout, companyId, title: "Checked out by another run", checkoutRunId: otherRunId },
+      { id: unchecked, companyId, title: "Not checked out" },
+    ]);
+    const attempt = (targetIssueId: string) =>
+      observeCrossIssueInfluence(db, { companyId, runId: timerRunId, agentId, targetIssueId, kind: "comment" });
+
+    // Allowed, and counted against the run's cap like any cross-issue write:
+    // checking issues out must not become a way around the cap.
+    await expect(attempt(own)).resolves.toMatchObject({ allowed: true, count: 1 });
+    await db.insert(activityLog).values(Array.from({ length: 19 }, () => ({
+      companyId, actorType: "agent" as const, actorId: agentId, agentId, runId: timerRunId,
+      action: "issue.cross_issue_influence_observed", entityType: "issue", entityId: own,
+    })));
+    await expect(observeCrossIssueInfluence(db, {
+      companyId, runId: timerRunId, agentId, targetIssueId: own, kind: "comment", now: CROSS_ISSUE_INFLUENCE_ENFORCE_AT,
+    })).resolves.toMatchObject({ allowed: false, count: 21 });
+    for (const target of [othersCheckout, unchecked]) {
+      await expect(attempt(target)).rejects.toMatchObject({
+        status: 403,
+        details: expect.objectContaining({ code: "cross_issue_influence_run_context_required" }),
+      });
+    }
   });
 });

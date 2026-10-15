@@ -254,11 +254,12 @@ export function describeIssueWriteDenial(
         description:
           `Every agent comment and task update is attributed to a heartbeat run so the ` +
           `cross-issue cap can be counted and the audit trail can name who acted for whom. ` +
-          `This request arrived without a valid run, so it could not be contained.`,
-        whoCanAct: `${actor}, once the request carries its own run id.`,
+          `This request came from a run that was not started for an issue (for example a ` +
+          `timer heartbeat), or without a valid run, so it could not be contained.`,
+        whoCanAct: `${actor}, after checking the issue out in this run.`,
         sanctionedPath:
-          `Send the \`X-Paperclip-Run-Id\` header with your current run (\`$PAPERCLIP_RUN_ID\`) ` +
-          `and retry.`,
+          `Check the issue out first (\`POST /api/issues/{issueId}/checkout\`) in this run, ` +
+          `then retry. A run started for an issue may also write to other issues up to the cap.`,
 
       };
 

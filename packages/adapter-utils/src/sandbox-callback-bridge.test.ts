@@ -1397,6 +1397,9 @@ describe("sandbox callback bridge", () => {
       { method: "GET", path: "/api/companies/co-1/approvals" },
       { method: "GET", path: "/api/companies/co-1/routines" },
       { method: "GET", path: "/api/companies/co-1/skills" },
+      { method: "GET", path: "/api/companies/co-1/skills/skill-1" },
+      { method: "GET", path: "/api/companies/co-1/skills/skill-1/files" },
+      { method: "PATCH", path: "/api/companies/co-1/skills/skill-1/files" },
       { method: "GET", path: "/api/companies/co-1/email/inboxes" },
       { method: "GET", path: "/api/companies/co-1/email/tasks/issue-1" },
       { method: "GET", path: "/api/companies/co-1/email/deliveries/send-1" },
@@ -1466,6 +1469,10 @@ describe("sandbox callback bridge", () => {
       { method: "POST", path: "/api/email/inboxes/inbox-1/control" },
       { method: "DELETE", path: "/api/companies/co-1/email/tasks/issue-1" },
       { method: "DELETE", path: "/api/secrets" },
+      { method: "POST", path: "/api/companies/co-1/skills" },
+      { method: "DELETE", path: "/api/companies/co-1/skills/skill-1" },
+      { method: "DELETE", path: "/api/companies/co-1/skills/skill-1/files" },
+      { method: "PATCH", path: "/api/companies/co-1/skills/skill-1" },
       // Pin the runtime-services regex to start/stop/restart only — anything
       // else (delete, reset, wipe, etc.) must stay denied even if the API
       // grows new actions later.
