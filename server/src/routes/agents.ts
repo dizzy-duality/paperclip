@@ -3010,6 +3010,21 @@ export function agentRoutes(
     };
   }
 
+  // Adapters fill desiredSkillEntries[].versionId from the runtime entries, which carry the version a
+  // GitHub-source skill currently resolves to. Clients send these entries back on the next sync, so an
+  // unpinned skill would be saved as pinned to today's version and never see an update. Report the pins
+  // stored in the agent's config instead; entries[].versionId still shows what runs.
+  function withStoredSkillPins(snapshot: AgentSkillSnapshot, adapterConfig: unknown): AgentSkillSnapshot {
+    const stored = new Map(
+      readPaperclipSkillSyncPreference(adapterConfig as Record<string, unknown>).desiredSkillEntries
+        .map((entry) => [entry.key, entry.versionId] as const),
+    );
+    return {
+      ...snapshot,
+      desiredSkillEntries: snapshot.desiredSkills.map((key) => ({ key, versionId: stored.get(key) ?? null })),
+    };
+  }
+
   // CEO and board-created onboarding chief-of-staff instructions assume the
   // core paperclip skills (board coordination, planning, hiring, memory).
   // Union them into these skills-capable hires/creates so their desired skills
@@ -4055,7 +4070,7 @@ export function agentRoutes(
       adapterType: agent.adapterType,
       config: connectorConfig,
     });
-    res.json(annotateConnectorSkills(snapshot, connectorAssignments));
+    res.json(annotateConnectorSkills(withStoredSkillPins(snapshot, agent.adapterConfig), connectorAssignments));
   });
 
   router.post(
@@ -4155,7 +4170,7 @@ export function agentRoutes(
         },
       });
 
-      res.json(annotateConnectorSkills(snapshot, connectorAssignments));
+      res.json(annotateConnectorSkills(withStoredSkillPins(snapshot, updated.adapterConfig), connectorAssignments));
     },
   );
 
@@ -4540,6 +4555,36 @@ export function agentRoutes(
 
     const state = await heartbeat.getRuntimeState(id);
     res.json(state);
+  });
+
+  router.get("/agents/:id/run-hold", async (req, res) => {
+    const id = req.params.id as string;
+    const agent = await getAccessibleResource(req, res, svc.getById(id), "Agent not found");
+    if (!agent) return;
+    if (!(await assertAgentReadAllowed(req, res, agent))) return;
+    res.json({ hold: await heartbeat.getAgentRunHold(id) });
+  });
+
+  router.post("/agents/:id/run-hold/resume", async (req, res) => {
+    assertBoard(req);
+    const id = req.params.id as string;
+    const agent = await getAccessibleAgent(req, res, id);
+    if (!agent) return;
+    await assertBoardCanManageAgentsForCompany(req, agent.companyId);
+
+    const result = await heartbeat.resumeHeldRun(id);
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId: agent.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      action: "agent.run_hold_resumed",
+      entityType: "agent",
+      entityId: agent.id,
+      runId: result.runId,
+      details: { outcome: result.outcome },
+    });
+    res.json(result);
   });
 
   router.get("/agents/:id/task-sessions", async (req, res) => {

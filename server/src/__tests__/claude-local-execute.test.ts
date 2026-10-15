@@ -249,6 +249,35 @@ process.exit(1);
   await fs.chmod(commandPath, 0o755);
 }
 
+async function writePromptTooLongClaudeCommand(commandPath: string): Promise<void> {
+  const script = `#!/usr/bin/env node
+const fs = require("node:fs");
+
+const capturePath = process.env.PAPERCLIP_TEST_CAPTURE_PATH;
+const payload = { argv: process.argv.slice(2), prompt: fs.readFileSync(0, "utf8") };
+if (capturePath) {
+  const entries = fs.existsSync(capturePath) ? JSON.parse(fs.readFileSync(capturePath, "utf8")) : [];
+  entries.push(payload);
+  fs.writeFileSync(capturePath, JSON.stringify(entries), "utf8");
+}
+// Resumed attempts are too long; fresh ones too when PAPERCLIP_TEST_ALWAYS_TOO_LONG is set.
+if (process.argv.includes("--resume") || process.env.PAPERCLIP_TEST_ALWAYS_TOO_LONG) {
+  console.log(JSON.stringify({
+    type: "result",
+    subtype: "success",
+    session_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    is_error: true,
+    result: "Prompt is too long · the request is ~1622421 tokens (limit 1000000)",
+  }));
+  process.exit(1);
+}
+console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", model: "claude-sonnet" }));
+console.log(JSON.stringify({ type: "result", session_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", result: "hello", usage: { input_tokens: 1, cache_read_input_tokens: 0, output_tokens: 1 } }));
+`;
+  await fs.writeFile(commandPath, script, "utf8");
+  await fs.chmod(commandPath, 0o755);
+}
+
 async function writeRetryThenSucceedClaudeCommand(commandPath: string): Promise<void> {
   const script = `#!/usr/bin/env node
 const fs = require("node:fs");
@@ -1840,5 +1869,56 @@ describe("claude execute", () => {
       restore();
       await fs.rm(root, { recursive: true, force: true });
     }
+  });
+  describe("a session too long to resume", () => {
+    async function run(alwaysTooLong: boolean) {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-exec-too-long-"));
+      const { workspace, commandPath, capturePath, restore } = await setupExecuteEnv(root, {
+        commandWriter: writePromptTooLongClaudeCommand,
+      });
+      const logs: string[] = [];
+      try {
+        const result = await execute({
+          runId: "run-too-long",
+          agent: { id: "agent-1", companyId: "co-1", name: "Test", adapterType: "claude_local", adapterConfig: { engine: "cli" } },
+          runtime: { sessionId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", sessionParams: null, sessionDisplayId: null, taskKey: null },
+          config: {
+            engine: "cli",
+            command: commandPath,
+            cwd: workspace,
+            env: {
+              PAPERCLIP_TEST_CAPTURE_PATH: capturePath,
+              ...(alwaysTooLong ? { PAPERCLIP_TEST_ALWAYS_TOO_LONG: "1" } : {}),
+            },
+            promptTemplate: "Do work.",
+          },
+          context: {},
+          authToken: "tok",
+          onLog: async (_stream, chunk) => { logs.push(chunk); },
+        });
+        const captured: Array<{ argv: string[] }> = JSON.parse(await fs.readFile(capturePath, "utf-8"));
+        return { result, argvs: captured.map((entry) => entry.argv), logs };
+      } finally {
+        restore();
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    }
+
+    it("is dropped, and the run retries with a fresh session", async () => {
+      const { result, argvs, logs } = await run(false);
+      expect(argvs).toHaveLength(2);
+      expect(argvs[0]).toContain("--resume");
+      expect(argvs[1]).not.toContain("--resume");
+      expect(result.errorCode).toBeNull();
+      expect(result.sessionId).toBe("dddddddd-dddd-4ddd-8ddd-dddddddddddd");
+      expect(logs.some((l) => l.includes("is too long to resume"))).toBe(true);
+    });
+
+    it("fails with a clear error and keeps no session when a fresh one is too long as well", async () => {
+      const { result } = await run(true);
+      expect(result.errorCode).toBe("claude_prompt_too_long");
+      expect(result.sessionId).toBeNull();
+      expect(result.clearSession).toBe(true);
+    });
   });
 });

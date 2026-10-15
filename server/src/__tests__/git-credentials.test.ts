@@ -12,6 +12,7 @@ import {
   describeGitAuthFailure,
   isGitHubHttpsRemoteUrl,
   scrubGitCredentialText,
+  githubGrantIdentitySource,
 } from "../services/git-credentials.ts";
 
 const fakeDb = null as unknown as Db;
@@ -355,5 +356,13 @@ describe("DEFAULT_GITHUB_TOKEN_SECRET_NAMES", () => {
       "GH_TOKEN",
       "PAPERCLIP_GITHUB_TOKEN",
     ]);
+  });
+});
+
+describe("githubGrantIdentitySource", () => {
+  it("names a member's grant reached without that member as delegated", () => {
+    expect(githubGrantIdentitySource({ kind: "agent", subjectUserId: null }, null)).toBe("dedicated");
+    expect(githubGrantIdentitySource({ kind: "user", subjectUserId: "A" }, "A")).toBe("personal");
+    expect(githubGrantIdentitySource({ kind: "user", subjectUserId: "A" }, null)).toBe("delegated");
   });
 });

@@ -282,6 +282,41 @@ const support = await getEmbeddedPostgresTestSupport();
     },
   );
 
+  // Pins the inherited-null override as a deliberate property. activate() writes
+  // every accepted context to issues.continuationIdentityContextId, and dispatch
+  // uses that as the next run's parent, so one unattended run makes every later
+  // dispatched run on the issue ownerless until a person comments. Unattended
+  // runs get GitHub through a dedicated or delegated grant instead of borrowing
+  // a person's identity (see git-credentials).
+  it("keeps later dispatched runs on an issue ownerless after one unattended run, until a person comments", async () => {
+    const input = await seed();
+    const issuePointer = async () =>
+      (await db.select().from(issues).where(eq(issues.id, input.issueId)))[0]!.continuationIdentityContextId;
+    const dispatch = async (messageIds: string[] = []) => {
+      const runId = randomUUID();
+      await db.insert(heartbeatRuns).values({
+        id: runId, companyId: input.companyId, agentId: input.agentId,
+        status: "running", contextSnapshot: { issueId: input.issueId },
+      });
+      return initializeRunIdentity(db, {
+        companyId: input.companyId, runId, issueId: input.issueId, messageIds,
+        parentContextId: await issuePointer(), responsibleUserId: "A", cause: "timer",
+      });
+    };
+    const unattended = await initializeRunIdentity(db, {
+      ...input, messageIds: [], responsibleUserId: null, cause: "company_default",
+    });
+    expect(await issuePointer()).toBe(unattended.id);
+    for (const _ of [1, 2]) {
+      const later = await dispatch();
+      expect(later.responsibleUserId).toBeNull();
+      expect(later.cause).toBe("company_default");
+    }
+    const commented = await dispatch([input.messageIds[0]!]);
+    expect(commented.responsibleUserId).toBe("A");
+    const after = await dispatch();
+    expect(after.responsibleUserId).toBe("A");
+  });
   it("does not turn a company-default fallback into personal consent on continuation", async () => {
     const input = await seed();
     await initializeRunIdentity(db, { ...input, messageIds: [], responsibleUserId: "A", cause: "company_default" });
