@@ -175,7 +175,14 @@ import { extendApprovedExecutionWaitDeadline } from "./approved-execution-wait.j
 
 const DEFAULT_SESSION_TTL_MS = 15 * 60 * 1000;
 const MAX_SESSION_TTL_MS = 60 * 60 * 1000;
-const DEFAULT_TOOL_TIMEOUT_MS = 10_000;
+// The whole budget of a tool call that names no timeout, which is every call
+// agents make over the MCP gateway route. A remote MCP server behind a gateway
+// (Obot: upstream session, token exchanges, then the call) needs more than the
+// old 10 s. Operators can change it with PAPERCLIP_TOOL_TIMEOUT_MS.
+function defaultToolTimeoutMs() {
+  const configured = Number(process.env.PAPERCLIP_TOOL_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured >= 1 ? Math.floor(configured) : 60_000;
+}
 
 export function resolveCredentialGrantKind(
   policy: "shared" | "per_user" | "per_user_with_fallback" | "per_agent",
@@ -714,11 +721,10 @@ function gatewaySessionFromRow(
 }
 
 function timeoutMs(value: number | undefined) {
-  if (!Number.isFinite(value)) return DEFAULT_TOOL_TIMEOUT_MS;
-  return Math.max(
-    1,
-    Math.min(60_000, Math.floor(value ?? DEFAULT_TOOL_TIMEOUT_MS)),
-  );
+  const fallback = defaultToolTimeoutMs();
+  if (!Number.isFinite(value)) return fallback;
+  // A caller may ask for up to 60 s, or up to the operator's default if higher.
+  return Math.max(1, Math.min(Math.max(60_000, fallback), Math.floor(value ?? fallback)));
 }
 
 function sessionTtlMs(value: number | undefined) {
@@ -5365,7 +5371,7 @@ export function createToolGatewayService(
     );
     if (template.templateId === "paperclip.cognee-cloud") {
       return callLocalStdioMcp({ connection: input.connection, template, env,
-        protocolMethod: input.method, protocolParams: input.params ?? {}, timeoutMs: DEFAULT_TOOL_TIMEOUT_MS });
+        protocolMethod: input.method, protocolParams: input.params ?? {}, timeoutMs: defaultToolTimeoutMs() });
     }
     return runtimeSupervisor.useConnectionSlot(
       {
@@ -5389,7 +5395,7 @@ export function createToolGatewayService(
           env,
           protocolMethod: input.method,
           protocolParams: input.params ?? {},
-          timeoutMs: DEFAULT_TOOL_TIMEOUT_MS,
+          timeoutMs: defaultToolTimeoutMs(),
         }),
     );
   }
