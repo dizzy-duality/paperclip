@@ -30,7 +30,11 @@ export function AssignSourceSkillsDialog({ companyId, source, onClose }: {
       const failed: Array<{ name: string; message: string }> = [];
       for (const agent of assignable.filter(candidate => chosen.has(candidate.id))) {
         try {
-          await agentsApi.syncSkills(agent.id, keys, 'add', companyId);
+          // Send only skills the agent lacks: re-adding one it has would reset
+          // a version pin on it to "current".
+          const current = new Set((await agentsApi.skills(agent.id, companyId)).desiredSkills);
+          const missing = keys.filter(key => !current.has(key));
+          if (missing.length > 0) await agentsApi.syncSkills(agent.id, missing, 'add', companyId);
         } catch (error) {
           failed.push({ name: agent.name, message: error instanceof Error ? error.message : String(error) });
         }
