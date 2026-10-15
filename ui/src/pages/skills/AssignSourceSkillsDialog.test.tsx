@@ -8,7 +8,7 @@ import { AssignSourceSkillsDialog } from './AssignSourceSkillsDialog';
 import { agentsApi } from '@/api/agents';
 import { companySkillsApi } from '@/api/companySkills';
 
-vi.mock('@/api/agents', () => ({ agentsApi: { list: vi.fn(), syncSkills: vi.fn() } }));
+vi.mock('@/api/agents', () => ({ agentsApi: { list: vi.fn(), skills: vi.fn(), syncSkills: vi.fn() } }));
 vi.mock('@/api/companySkills', () => ({ companySkillsApi: { list: vi.fn() } }));
 
 const entry = (id: string, skillId: string | null) => ({ id, sourceId: 's1', path: `skills/${id}`, name: id, description: null, skillId, selection: 'selected' as const, present: true, error: null });
@@ -25,6 +25,8 @@ beforeEach(() => {
     { id: 'ag1', name: 'Builder', status: 'idle' }, { id: 'ag2', name: 'Reviewer', status: 'active' }, { id: 'ag3', name: 'Retired', status: 'terminated' },
   ] as never);
   vi.mocked(companySkillsApi.list).mockResolvedValue([{ id: 'skill-a', key: 'github/1/aaa/a' }, { id: 'skill-b', key: 'github/1/bbb/b' }, { id: 'other', key: 'local/x/other' }] as never);
+  // Builder already has skill a (pinned): re-sending it would drop the pin.
+  vi.mocked(agentsApi.skills).mockImplementation(async (id: string) => ({ desiredSkills: id === 'ag1' ? ['github/1/aaa/a'] : [] }) as never);
   vi.mocked(agentsApi.syncSkills).mockImplementation(async (id: string) => {
     if (id === 'ag2') throw new Error('Permission denied');
     return {} as never;
@@ -33,7 +35,7 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.clearAllMocks(); });
 
 describe('AssignSourceSkillsDialog', () => {
-  it("adds the repository's installed skills to each chosen agent and names the agents it could not update", async () => {
+  it("adds the repository's installed skills each chosen agent lacks and names the agents it could not update", async () => {
     const onClose = vi.fn();
     host = document.createElement('div'); document.body.append(host); root = createRoot(host);
     const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
@@ -47,7 +49,7 @@ describe('AssignSourceSkillsDialog', () => {
     await flush(); await flush();
 
     expect(vi.mocked(agentsApi.syncSkills).mock.calls).toEqual([
-      ['ag1', ['github/1/aaa/a', 'github/1/bbb/b'], 'add', 'c1'],
+      ['ag1', ['github/1/bbb/b'], 'add', 'c1'],
       ['ag2', ['github/1/aaa/a', 'github/1/bbb/b'], 'add', 'c1'],
     ]);
     expect(document.querySelector('[role="alert"]')?.textContent).toContain('Reviewer: Permission denied');
