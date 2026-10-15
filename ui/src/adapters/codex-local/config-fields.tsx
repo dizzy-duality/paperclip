@@ -162,7 +162,7 @@ export function CodexLocalConfigFields({
       {!hideEngineChoice && (
         <Field
           label="Execution engine"
-          hint="Default uses ACP. If ACP is unavailable, the run fails with a setup error. Choose CLI explicitly to use it."
+          hint="Default uses the CLI. Choose ACP only if the agent runs where an ACP agent is installed."
         >
           <select
             className={inputClass}
@@ -183,7 +183,7 @@ export function CodexLocalConfigFields({
                   );
             }}
           >
-            <option value="auto">Default (ACP)</option>
+            <option value="auto">Default (CLI)</option>
             <option value="cli">Codex CLI</option>
             <option value="acp">ACP</option>
           </select>
