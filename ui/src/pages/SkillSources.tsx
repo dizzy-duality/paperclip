@@ -20,6 +20,7 @@ import { SkillSourceTree, type SkillTreeCandidate } from './skills/SkillSourceTr
 import { timeAgo } from '@/lib/timeAgo';
 import { skillRoute } from '@/lib/company-skill-routes';
 import { consumeSkillSourceReturn, rememberSkillSourceReturn } from '@/lib/skill-source-connect-return';
+import { AssignSourceSkillsDialog } from './skills/AssignSourceSkillsDialog';
 
 const sourceKey = (companyId: string) => queryKeys.skillSources.all(companyId);
 export function SkillSources() {
@@ -29,6 +30,7 @@ export function SkillSources() {
   const client = useQueryClient();
   const { setBreadcrumbs } = useBreadcrumbs();
   const [results, setResults] = useState<Record<string, string>>({});
+  const [assigning, setAssigning] = useState<SkillSource | null>(null);
   const companyId = selectedCompanyId ?? '';
   useEffect(() => { setBreadcrumbs([{ label: 'Skills', href: '/skills' }, { label: 'Sources' }]); }, [setBreadcrumbs]);
   const query = useQuery({ queryKey: sourceKey(companyId), queryFn: () => skillSourcesApi.list(companyId), enabled: Boolean(companyId) });
@@ -70,6 +72,7 @@ export function SkillSources() {
               <DropdownMenuContent align="end">
                 <DropdownMenuItem disabled={!source.enabled || refresh.isPending} onSelect={() => refresh.mutate(source.id)}>{refresh.isPending && refresh.variables === source.id ? 'Refreshing…' : 'Refresh'}</DropdownMenuItem>
                 <DropdownMenuItem onSelect={() => navigate(`/skills/sources/${source.id}`)}>Select skills</DropdownMenuItem>
+                <DropdownMenuItem disabled={installed.length === 0} onSelect={() => setAssigning(source)}>Assign to agents…</DropdownMenuItem>
                 <DropdownMenuItem variant="destructive" disabled={!source.enabled || disconnect.isPending} onSelect={() => disconnect.mutate(source.id)}>Disconnect source</DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -93,6 +96,7 @@ export function SkillSources() {
     {sourceId && (sourceId === 'new' || activeSource) && <SourceDialog key={`${companyId}:${sourceId}`} companyId={companyId} source={activeSource} onClose={() => navigate('/skills/sources')} onSaved={async result => {
       setResults(prev => ({ ...prev, [result.source.id]: result.warnings.join(' · ') })); await invalidate(); navigate('/skills/sources');
     }} />}
+    {assigning && <AssignSourceSkillsDialog companyId={companyId} source={assigning} onClose={() => setAssigning(null)} />}
     {sourceId && sourceId !== 'new' && query.isSuccess && !activeSource && <p role="alert" className="text-sm text-destructive">Source not found.</p>}
   </div>;
 }
