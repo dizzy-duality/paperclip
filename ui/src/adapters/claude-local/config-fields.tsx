@@ -96,7 +96,7 @@ export function ClaudeLocalAdvancedFields({
         environment owns both, so the managed-sandbox-only policy hides them,
         the same way `runnerManaged` hides them for the Paperclip Runner.
       */}
-      {!managedSandboxOnly && <Field label="Execution engine" hint="Default uses ACP. If ACP is unavailable, the run fails with a setup error. Choose CLI explicitly to use it.">
+      {!managedSandboxOnly && <Field label="Execution engine" hint="Default uses the CLI. Choose ACP only if the agent runs where an ACP agent is installed.">
         <select
           className={inputClass}
           value={engine}
@@ -107,7 +107,7 @@ export function ClaudeLocalAdvancedFields({
               : mark("adapterConfig", "engine", value === "auto" ? undefined : value);
           }}
         >
-          <option value="auto">Default (ACP)</option>
+          <option value="auto">Default (CLI)</option>
           <option value="cli">Claude CLI</option>
           <option value="acp">ACP</option>
         </select>
