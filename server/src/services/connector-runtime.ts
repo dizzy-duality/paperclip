@@ -232,8 +232,9 @@ export async function prepareConnectorSkillDelivery(
 ) {
   const scopedFiles =
     adapterType === "paperclip_runner" ||
-    (config.engine === "cli" &&
-      ["codex_local", "claude_local", "kimi_local"].includes(adapterType));
+    (config.engine === "cli" && adapterType === "kimi_local") ||
+    // dd: Claude and Codex agents without an engine run the CLI (see their acp.ts).
+    (config.engine !== "acp" && ["codex_local", "claude_local"].includes(adapterType));
   if (scopedFiles) {
     // Runner models with semantic tools cannot necessarily read staged skill
     // files. Supply the Slack contract and verified source IDs in their input;

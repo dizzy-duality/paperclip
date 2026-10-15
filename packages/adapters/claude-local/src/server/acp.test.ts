@@ -318,20 +318,21 @@ describe("claude_local ACP lane", () => {
     expect(nodeVersionMeetsClaudeAcpMinimum()).toBe(true);
   });
 
-  it("keeps ACP selected and reports unavailable prerequisites for default and explicit engines", async () => {
+  it("runs the CLI by default and reports unavailable ACP prerequisites for an explicit ACP engine", async () => {
     const root = await makeTempRoot("paperclip-claude-acp-default-");
     const commandPath = path.join(root, "bin", "claude-agent-acp");
     await fs.mkdir(path.dirname(commandPath), { recursive: true });
     await fs.writeFile(commandPath, "#!/usr/bin/env sh\n", "utf8");
     setNodeVersion("v24.11.0");
 
-    expect(resolveClaudeExecutionEngine({})).toEqual({ engine: "acp", explicit: false });
+    // dd: an agent that names no engine runs the CLI (our images ship no ACP agent).
+    expect(resolveClaudeExecutionEngine({})).toEqual({ engine: "cli", explicit: false });
     await expect(
       resolveClaudeExecutionEngineForRun({
         config: { agentCommand: commandPath },
         executionTarget: null,
       }),
-    ).resolves.toEqual({ engine: "acp", explicit: false });
+    ).resolves.toEqual({ engine: "cli", explicit: false });
     await expect(
       resolveClaudeExecutionEngineForRun({
         config: { engine: "cli", agentCommand: commandPath },
@@ -342,12 +343,12 @@ describe("claude_local ACP lane", () => {
     setNodeVersion("v24.10.0");
     await expect(
       resolveClaudeExecutionEngineForRun({
-        config: { agentCommand: commandPath },
+        config: { engine: "acp", agentCommand: commandPath },
         executionTarget: null,
       }),
     ).resolves.toMatchObject({
       engine: "acp",
-      explicit: false,
+      explicit: true,
       unavailableReason: expect.stringContaining("Node"),
     });
     await expect(
@@ -358,17 +359,13 @@ describe("claude_local ACP lane", () => {
     ).resolves.toMatchObject({ engine: "acp", explicit: true, unavailableReason: expect.stringContaining("Node") });
   });
 
-  it("requires explicit CLI selection for local filesystem or network scope", async () => {
+  it("runs the CLI by default with local filesystem or network scope, and refuses ACP confinement", async () => {
     await expect(
       resolveClaudeExecutionEngineForRun({
         config: { filesystemScope: "workspace" },
         executionTarget: null,
       }),
-    ).resolves.toMatchObject({
-      engine: "acp",
-      explicit: false,
-      unavailableReason: expect.stringContaining("confinement"),
-    });
+    ).resolves.toEqual({ engine: "cli", explicit: false });
     await expect(
       resolveClaudeExecutionEngineForRun({
         config: { engine: "acp", filesystemScope: "workspace" },
@@ -380,14 +377,10 @@ describe("claude_local ACP lane", () => {
         config: { networkScope: "deny" },
         executionTarget: null,
       }),
-    ).resolves.toMatchObject({
-      engine: "acp",
-      explicit: false,
-      unavailableReason: expect.stringContaining("confinement"),
-    });
+    ).resolves.toEqual({ engine: "cli", explicit: false });
     await expect(
       resolveClaudeExecutionEngineForRun({
-        config: { networkScope: "public" },
+        config: { engine: "acp", networkScope: "public" },
         executionTarget: null,
       }),
     ).rejects.toThrow('networkScope must be "deny" or "allowlist"');
@@ -397,7 +390,7 @@ describe("claude_local ACP lane", () => {
     setNodeVersion("v24.11.0");
     await expect(
       resolveClaudeExecutionEngineForRun({
-        config: { agentCommand: "claude-agent-acp" },
+        config: { engine: "acp", agentCommand: "claude-agent-acp" },
         executionTarget: {
           kind: "remote",
           transport: "sandbox",
@@ -416,14 +409,14 @@ describe("claude_local ACP lane", () => {
           },
         },
       }),
-    ).resolves.toEqual({ engine: "acp", explicit: false });
+    ).resolves.toEqual({ engine: "acp", explicit: true });
   });
 
   it("reports unavailable ACP for one-shot sandbox auto runs", async () => {
     setNodeVersion("v24.11.0");
     await expect(
       resolveClaudeExecutionEngineForRun({
-        config: {},
+        config: { engine: "acp" },
         executionTarget: {
           kind: "remote",
           transport: "sandbox",
@@ -433,7 +426,7 @@ describe("claude_local ACP lane", () => {
       }),
     ).resolves.toMatchObject({
       engine: "acp",
-      explicit: false,
+      explicit: true,
       unavailableReason: expect.stringContaining("bidirectional remote process"),
     });
   });
@@ -442,7 +435,7 @@ describe("claude_local ACP lane", () => {
     setNodeVersion("v24.11.0");
     await expect(
       resolveClaudeExecutionEngineForRun({
-        config: {},
+        config: { engine: "acp" },
         executionTarget: {
           kind: "remote",
           transport: "ssh",
@@ -461,7 +454,7 @@ describe("claude_local ACP lane", () => {
       }),
     ).resolves.toMatchObject({
       engine: "acp",
-      explicit: false,
+      explicit: true,
       unavailableReason: expect.stringContaining("sandbox remote targets only"),
     });
   });
@@ -1225,7 +1218,7 @@ describe("claude_local ACP lane", () => {
     setNodeVersion("v24.11.0");
     await expect(
       resolveClaudeExecutionEngineForRun({
-        config: { agentCommand: "claude-agent-acp" },
+        config: { engine: "acp", agentCommand: "claude-agent-acp" },
         executionTarget: {
           kind: "remote",
           transport: "sandbox",
@@ -1235,7 +1228,7 @@ describe("claude_local ACP lane", () => {
       }),
     ).resolves.toMatchObject({
       engine: "acp",
-      explicit: false,
+      explicit: true,
       unavailableReason: expect.stringContaining("bidirectional remote process"),
     });
   });

@@ -4237,12 +4237,6 @@ export function normalizePaperclipRunnerAdapterConfig(
   adapterType: string,
   config: Record<string, unknown>,
 ): Record<string, unknown> {
-  // dd: our agent images ship no ACP agent, so a Claude or Codex agent that
-  // names no engine is stored with the CLI engine instead of failing every run
-  // with adapter_engine_unavailable. An explicit "acp" is kept.
-  if ((adapterType === "claude_local" || adapterType === "codex_local") && config.engine !== "acp" && config.engine !== "cli") {
-    return { ...config, engine: "cli" };
-  }
   if (adapterType !== "paperclip_runner") return config;
   config = normalizeLegacyRunnerProvider(config);
   const next: Record<string, unknown> = {
