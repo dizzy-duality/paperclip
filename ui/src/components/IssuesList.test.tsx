@@ -26,6 +26,7 @@ const dialogState = vi.hoisted(() => ({
 const mockIssuesApi = vi.hoisted(() => ({
   list: vi.fn(),
   listLabels: vi.fn(),
+  update: vi.fn(),
 }));
 
 const mockKanbanBoard = vi.hoisted(() => vi.fn());
@@ -373,6 +374,56 @@ describe("IssuesList", () => {
   afterEach(() => {
     vi.useRealTimers();
     container.remove();
+  });
+
+  it("changes the status of the selected tasks and keeps the ones the server refused selected", async () => {
+    mockIssuesApi.update.mockReset();
+    mockIssuesApi.update.mockImplementation(async (id: string) => {
+      if (id === "issue-b") throw new Error("Approval needs a comment");
+      return {};
+    });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const { root } = renderWithQueryClient(
+      <IssuesList
+        issues={[
+          createIssue({ id: "issue-a", identifier: "PAP-1", title: "First" }),
+          createIssue({ id: "issue-b", identifier: "PAP-2", title: "Second" }),
+          createIssue({ id: "issue-c", identifier: "PAP-3", title: "Third" }),
+        ]}
+        isLoading={false}
+        agents={[]}
+        projects={[]}
+        viewStateKey="paperclip:test-bulk"
+        rowPresentation="task"
+        toolbarPresentation="collection"
+        onUpdateIssue={() => undefined}
+      />,
+      container,
+    );
+    const box = (label: string) => document.querySelector<HTMLElement>(`[aria-label="${label}"]`);
+    // Status options repeat their label in the glyph's accessible text.
+    const button = (text: string) => [...document.querySelectorAll<HTMLButtonElement>("button")].find((el) => el.textContent?.trim().endsWith(text));
+
+    await waitForAssertion(() => expect(box("Select PAP-1")).not.toBeNull());
+    expect(container.querySelector("[aria-label='Selected tasks']")).toBeNull();
+    act(() => { box("Select PAP-1")!.click(); });
+    act(() => { box("Select PAP-2")!.click(); });
+    expect(container.querySelector("[aria-label='Selected tasks']")?.textContent).toContain("2 selected");
+
+    act(() => { button("Set status")!.click(); });
+    await waitForAssertion(() => expect(button("Cancelled")).toBeDefined());
+    await act(async () => { button("Cancelled")!.click(); });
+
+    await waitForAssertion(() => expect(container.querySelector("[aria-label='Selected tasks'] [role='alert']")?.textContent).toContain("PAP-2: Approval needs a comment"));
+    expect(mockIssuesApi.update.mock.calls).toEqual([
+      ["issue-a", { status: "cancelled" }],
+      ["issue-b", { status: "cancelled" }],
+    ]);
+    expect(confirm).toHaveBeenCalledWith("Cancel 2 tasks?");
+    expect(container.querySelector("[aria-label='Selected tasks']")?.textContent).toContain("1 selected");
+
+    confirm.mockRestore();
+    act(() => root.unmount());
   });
 
   it("uses the master list and legacy persistence when Streamlined UI is off", async () => {
