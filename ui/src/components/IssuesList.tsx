@@ -97,6 +97,8 @@ import {
 import { taskDateGroup, taskDateGroupSeparator, type TaskDateGroup } from "../lib/task-date-groups";
 import { deriveOriginatingActor, ISSUE_STATUSES, type Issue, type IssueStatus, type Project } from "@paperclipai/shared";
 import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
+import { IssuesBulkBar } from "./IssuesBulkBar";
 const ISSUE_SEARCH_DEBOUNCE_MS = 250;
 const ISSUE_SEARCH_RESULT_LIMIT = 200;
 const ISSUE_BOARD_COLUMN_RESULT_LIMIT = 200;
@@ -820,6 +822,7 @@ function StreamlinedIssuesList({
     ),
   );
   const [assigneePickerIssueId, setAssigneePickerIssueId] = useState<string | null>(null);
+  const [selectedIssueIds, setSelectedIssueIds] = useState<ReadonlySet<string>>(() => new Set());
   const [assigneeSearch, setAssigneeSearch] = useState("");
   const [issueSearch, setIssueSearch] = useState(initialSearch ?? "");
   const [renderedIssueRowLimit, setRenderedIssueRowLimit] = useState(INITIAL_ISSUE_ROW_RENDER_LIMIT);
@@ -1227,6 +1230,30 @@ function StreamlinedIssuesList({
     liveIssueIds,
     issueFilterContext,
   ]);
+
+  // Bulk actions apply to selected tasks the current view still shows.
+  const selectedIssues = useMemo(
+    () => filtered.filter((issue) => selectedIssueIds.has(issue.id)),
+    [filtered, selectedIssueIds],
+  );
+  const selectionActive = selectedIssues.length > 0;
+  const setIssueSelected = useCallback((issueId: string, on: boolean) => {
+    setSelectedIssueIds((previous) => {
+      const next = new Set(previous);
+      if (on) next.add(issueId); else next.delete(issueId);
+      return next;
+    });
+  }, []);
+  const renderSelectBox = (issue: Issue) => (
+    <span className="inline-flex shrink-0 items-center" onClick={(event) => { event.stopPropagation(); }}>
+      <Checkbox
+        checked={selectedIssueIds.has(issue.id)}
+        onCheckedChange={(value) => setIssueSelected(issue.id, value === true)}
+        aria-label={`Select ${issue.identifier ?? issue.title}`}
+        className={cn(!selectionActive && "sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100")}
+      />
+    </span>
+  );
 
   const progressSummary = useMemo(
     () => shouldRenderSubIssueProgressSummary(showProgressSummary, issues.length)
@@ -2038,6 +2065,22 @@ function StreamlinedIssuesList({
         />
       )}
 
+      {viewState.viewMode === "list" && selectionActive && selectedCompanyId ? (
+        <IssuesBulkBar
+          companyId={selectedCompanyId}
+          selected={selectedIssues}
+          shownCount={filtered.length}
+          agents={agents}
+          onSelectAllShown={() => setSelectedIssueIds(new Set(filtered.map((issue) => issue.id)))}
+          onClear={() => setSelectedIssueIds(new Set())}
+          onSettled={(updatedIds) => setSelectedIssueIds((previous) => {
+            const next = new Set(previous);
+            for (const id of updatedIds) next.delete(id);
+            return next;
+          })}
+        />
+      ) : null}
+
       {viewState.viewMode === "board" ? (
         <KanbanBoard
           issues={filtered}
@@ -2258,8 +2301,9 @@ function StreamlinedIssuesList({
                           </>
                         )}
                         className={cn(isMutedIssue && "opacity-70", selectedNavKey === `issue:${issue.id}` && "bg-accent/50 hover:bg-accent/50")}
-                        leadingControl={rowPresentation === "task" ? (
-                          hasChildren ? (
+                        leadingControl={rowPresentation === "task" ? (<>
+                          {renderSelectBox(issue)}
+                          {hasChildren ? (
                             <button
                               type="button"
                               data-slot="icon-button"
@@ -2271,8 +2315,8 @@ function StreamlinedIssuesList({
                             </button>
                           ) : (
                             <span data-slot="task-row-disclosure-spacer" className="h-4 w-4 shrink-0" aria-hidden="true" />
-                          )
-                        ) : undefined}
+                          )}
+                        </>) : undefined}
                         statusSlot={rowPresentation === "task" ? (
                           <span className="relative inline-flex items-start self-stretch sm:items-center" onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}>
                             <StatusIcon status={issue.status} externalConversationState={issue.externalConversationState} size="md" blockerAttention={issue.blockerAttention} onChange={(s) => onUpdateIssue(issue.id, { status: s })} />
@@ -2292,8 +2336,9 @@ function StreamlinedIssuesList({
                           />
                         ) : undefined}
                         showIdentifier={visibleIssueColumnSet.has("id") && availableIssueColumnSet.has("id")}
-                        mobileLeading={
-                          hasChildren ? (
+                        mobileLeading={(<>
+                          {renderSelectBox(issue)}
+                          {hasChildren ? (
                             <button type="button" data-slot="icon-button" onClick={toggleCollapse}>
                               <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", isExpanded && "rotate-90")} />
                             </button>
@@ -2301,10 +2346,11 @@ function StreamlinedIssuesList({
                             <span className="inline-flex items-center" onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}>
                               <StatusIcon status={issue.status} externalConversationState={issue.externalConversationState} size="md" blockerAttention={issue.blockerAttention} onChange={(s) => onUpdateIssue(issue.id, { status: s })} />
                             </span>
-                          )
-                        }
+                          )}
+                        </>)}
                         desktopMetaLeading={rowPresentation === "legacy" ? (
                           <>
+                            <span className="hidden sm:inline-flex">{renderSelectBox(issue)}</span>
                             {hasChildren ? (
                               <button
                                 type="button"
