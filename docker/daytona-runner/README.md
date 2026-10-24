@@ -98,9 +98,10 @@ full Git SHA as `PAPERCLIP_RUNNER_SOURCE_REVISION`.
 Do not bake provider credentials, Paperclip bootstrap tickets, or Daytona
 preview tokens into this image. They remain per-run secret material.
 
-The provider-pack build pins the official Linux x64 Node 24.21.0 image by
-manifest digest. Its bundled Undici is 7.29.1, which fixes
-[GHSA-3wwx-pv8p-q78v](https://github.com/advisories/GHSA-3wwx-pv8p-q78v).
+The provider-pack build pins the official Linux x64 Node 24.22.1 image by
+manifest digest. Node 24.22.1 fixes the Brotli decoder overflow CVE-2026-111497,
+and its bundled Undici (7.30.1) keeps the fix for
+[GHSA-3wwx-pv8p-q78v](https://github.com/advisories/GHSA-3wwx-pv8p-q78v) (7.29.1).
 Pi separately verifies its private Node executable and nested npm dependency;
 changing the outer interpreter does not replace either provider-owned pin.
 
