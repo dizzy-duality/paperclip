@@ -19,7 +19,7 @@
 # node:24-slim — the runner requires Node >= 24.11 and the production
 # image builds on Node 24; the digest pin keeps the security gate's own
 # runtime immutable.
-FROM node:24-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e
+FROM node:24-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205
 WORKDIR /context
 COPY . .
 # Committed artifacts the image build reads whose drift checks cannot run
