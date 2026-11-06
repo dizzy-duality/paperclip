@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, like } from "drizzle-orm";
 import { assets as assetRows, type Db } from "@paperclipai/db";
 import type { StorageService } from "../storage/types.js";
 import { formatAttachmentSize, MAX_ATTACHMENT_BYTES } from "../attachment-types.js";
@@ -39,29 +39,34 @@ export async function externalizeInlineDataImages(
 }
 
 /**
- * Stores an inline image as a company image asset and returns its content URL.
- * An image the company already holds reuses that asset, so a retried write
- * yields the same text (comment retries dedupe on it).
+ * Stores an inline image as an asset and returns its content URL. On an existing
+ * task it goes in the task's namespace, which the asset route authorizes against
+ * the task; the same image on that task reuses the asset, so a retried write
+ * yields the same text (comment retries dedupe on it). A task being created has
+ * no id yet: the image is a draft, attached when the task is written.
  */
 export function inlineImageAssetStore(
   db: Db,
   storage: StorageService,
   companyId: string,
+  issueId: string | null,
   actor: { actorType: "agent" | "user"; actorId: string; agentId: string | null; runId: string | null; agentApiKeyId: string | null },
 ) {
   const assets = assetService(db);
   let n = 0;
+  const namespace = issueId ? `assets/issues/${issueId}` : "assets/issues/drafts";
   return async (image: { contentType: string; body: Buffer }) => {
     n += 1;
     const sha256 = createHash("sha256").update(image.body).digest("hex");
-    const [existing] = await db.select({ id: assetRows.id }).from(assetRows).where(and(
+    const [existing] = !issueId ? [] : await db.select({ id: assetRows.id }).from(assetRows).where(and(
+      like(assetRows.objectKey, `${companyId}/${namespace}/%`),
       eq(assetRows.companyId, companyId), eq(assetRows.sha256, sha256), eq(assetRows.contentType, image.contentType),
     )).limit(1);
     if (existing) return `/api/assets/${existing.id}/content`;
     const extension = image.contentType.split("/")[1]!.replace("jpeg", "jpg");
     const stored = await storage.putFile({
       companyId,
-      namespace: "assets/inline-images",
+      namespace,
       originalFilename: `inline-image-${n}.${extension}`,
       contentType: image.contentType,
       body: image.body,

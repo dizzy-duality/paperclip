@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { Readable } from "node:stream";
 import express from "express";
 import { eq, sql } from "drizzle-orm";
 import request from "supertest";
@@ -9,6 +10,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { errorHandler } from "../middleware/index.js";
+import { assetRoutes } from "../routes/assets.js";
 import { issueRoutes } from "../routes/issues.js";
 import type { StorageService } from "../storage/types.js";
 
@@ -35,7 +37,7 @@ describeEmbeddedPostgres("inline data images in task text", () => {
       stored.push(input.body);
       return {
         provider: "local_disk",
-        objectKey: `${input.namespace}/${randomUUID()}`,
+        objectKey: `${input.companyId}/${input.namespace}/${randomUUID()}`,
         contentType: input.contentType,
         byteSize: input.body.length,
         sha256: createHash("sha256").update(input.body).digest("hex"),
@@ -112,13 +114,41 @@ describeEmbeddedPostgres("inline data images in task text", () => {
     const assetIds = (await db.select({ id: assets.id }).from(assets).where(eq(assets.companyId, companyId)))
       .map((row) => row.id);
 
-    // The same image every time: stored once, one asset.
-    expect(assetIds).toHaveLength(1);
-    expect(stored).toEqual([PNG]);
+    // The create's draft, then the same image on the task: stored once more.
+    expect(assetIds).toHaveLength(2);
+    expect(stored).toEqual([PNG, PNG]);
     for (const text of [issue!.description!, comment!.body]) {
       expect(text).not.toContain("data:image");
       const [, id] = text.match(/!\[shot\]\(\/api\/assets\/([0-9a-f-]+)\/content\)/) ?? [];
       expect(assetIds).toContain(id);
+    }
+  });
+
+  it("keeps an inline image as private as its task", async () => {
+    const companyId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Private Co", status: "active", issuePrefix: "PRV", requireBoardApprovalForNewAgents: false });
+    const appFor = (actor: Express.Request["actor"]) => {
+      const app = express();
+      app.use(express.json({ limit: "10mb" }));
+      app.use((req, _res, next) => { req.actor = actor; next(); });
+      app.use("/api", issueRoutes(db, storage));
+      app.use("/api", assetRoutes(db, storage));
+      app.use(errorHandler);
+      return app;
+    };
+    const owner = appFor({ type: "board", userId: "local-board", source: "local_implicit", companyIds: [companyId] });
+    const member = appFor({ type: "board", userId: "member", source: "session", companyIds: [companyId], memberships: [{ companyId, status: "active", membershipRole: "member" }] });
+    const assetUrl = (text: string) => text.match(/\/api\/assets\/[0-9a-f-]+\/content/)![0];
+    (storage.getObject as ReturnType<typeof vi.fn>).mockResolvedValue({ contentType: "image/png", contentLength: PNG.length, stream: Readable.from(PNG) });
+
+    const created = await request(owner).post(`/api/companies/${companyId}/issues`)
+      .send({ title: "Private", visibility: "private", description: inline("Created") });
+    expect(created.status).toBe(201);
+    const patched = await request(owner).patch(`/api/issues/${created.body.id}`).send({ description: inline("Edited") });
+    expect(patched.status).toBe(200);
+
+    for (const text of [created.body.description, patched.body.description]) {
+      expect((await request(member).get(assetUrl(text))).status).toBe(404);
     }
   });
 });
