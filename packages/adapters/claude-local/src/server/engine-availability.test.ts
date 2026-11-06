@@ -63,9 +63,9 @@ describe("cold sandbox ACP setup", () => {
       if (command.includes("npm install")) installed = true;
       return { exitCode: installed ? 0 : 1, timedOut: false, signal: null, stdout: installed ? "/usr/local/bin/claude-agent-acp" : "", stderr: "", pid: null, startedAt: new Date().toISOString() };
     }};
-    await expect(resolveClaudeExecutionEngineForRun({ config: {}, executionTarget: {
+    await expect(resolveClaudeExecutionEngineForRun({ config: { engine: "acp" }, executionTarget: {
       kind: "remote", transport: "sandbox", providerKey: "daytona", remoteCwd: "/work", runner,
-    } as never })).resolves.toEqual({ engine: "acp", explicit: false });
+    } as never })).resolves.toEqual({ engine: "acp", explicit: true });
     expect(commands.filter(command => command.includes("npm install"))).toHaveLength(1);
     expect(commands.some(command => command.includes("@agentclientprotocol/claude-agent-acp@0.73.0"))).toBe(true);
   });
@@ -73,7 +73,7 @@ describe("cold sandbox ACP setup", () => {
   it("does not install or substitute for an operator's unavailable custom ACP command", async () => {
     Object.defineProperty(process, "version", { value: "v24.11.0" });
     const runner = { execute: vi.fn(async () => ({ exitCode: 1, timedOut: false, stdout: "", stderr: "", signal: null, pid: null, startedAt: new Date().toISOString() })) };
-    const result = await resolveClaudeExecutionEngineForRun({ config: { agentCommand: "custom-acp" }, executionTarget: {
+    const result = await resolveClaudeExecutionEngineForRun({ config: { engine: "acp", agentCommand: "custom-acp" }, executionTarget: {
       kind: "remote", transport: "sandbox", providerKey: "daytona", remoteCwd: "/work", runner,
     } as never });
     expect(result).toMatchObject({ engine: "acp", unavailableReason: expect.stringContaining("custom-acp") });
