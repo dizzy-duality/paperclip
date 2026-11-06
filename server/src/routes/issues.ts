@@ -4419,10 +4419,12 @@ export function issueRoutes(
 
   /**
    * Moves base64 `data:` images out of a task's description or a comment into
-   * company image assets before the write handler runs, so the stored text
-   * links to them instead of carrying them.
+   * image assets before the write handler runs, so the stored text links to
+   * them instead of carrying them. Those assets keep the task's privacy.
    */
-  function externalizeInlineImages(resolveCompanyId: (req: Request) => Promise<string | null>) {
+  function externalizeInlineImages(
+    resolveScope: (req: Request) => Promise<{ companyId: string; issueId: string | null } | null>,
+  ) {
     return async (req: Request, _res: Response, next: NextFunction) => {
       const body = req.body as Record<string, unknown> | undefined;
       const fields = INLINE_IMAGE_TEXT_FIELDS.filter((field) => {
@@ -4430,25 +4432,28 @@ export function issueRoutes(
         return typeof value === "string" && hasInlineDataImage(value);
       });
       if (fields.length === 0) return next();
-      const companyId = await resolveCompanyId(req);
+      const scope = await resolveScope(req);
       // An unknown or inaccessible issue is the handler's to refuse, with the
       // same response either way.
-      if (!companyId) return next();
+      if (!scope) return next();
+      const { companyId, issueId } = scope;
       try {
         assertCompanyAccess(req, companyId);
       } catch {
         return next();
       }
-      const store = inlineImageAssetStore(db, storage, companyId, getActorInfo(req));
+      const store = inlineImageAssetStore(db, storage, companyId, issueId, getActorInfo(req));
       for (const field of fields) {
         body![field] = (await externalizeInlineDataImages(body![field] as string, store)).text;
       }
       next();
     };
   }
-  const companyIdFromParams = async (req: Request) => req.params.companyId as string;
-  const companyIdOfIssue = async (req: Request) =>
-    (await svc.getById(req.params.id as string))?.companyId ?? null;
+  const scopeOfNewIssue = async (req: Request) => ({ companyId: req.params.companyId as string, issueId: null });
+  const scopeOfIssue = async (req: Request) => {
+    const issue = await svc.getById(req.params.id as string);
+    return issue ? { companyId: issue.companyId, issueId: issue.id } : null;
+  };
 
   function withContentPath<T extends { id: string }>(attachment: T) {
     const contentPath = `/api/attachments/${attachment.id}/content`;
@@ -12187,7 +12192,7 @@ export function issueRoutes(
     "/companies/:companyId/issues",
     applyCreateIssueStatusDefault,
     validateIssueMutationBody(createIssueSchema),
-    externalizeInlineImages(companyIdFromParams),
+    externalizeInlineImages(scopeOfNewIssue),
     async (req, res) => {
       const companyId = req.params.companyId as string;
       assertCompanyAccess(req, companyId);
@@ -13602,7 +13607,7 @@ export function issueRoutes(
   router.patch(
     "/issues/:id",
     validateIssueMutationBody(updateIssueRouteSchema),
-    externalizeInlineImages(companyIdOfIssue),
+    externalizeInlineImages(scopeOfIssue),
     async (req, res) => {
       // Snapshot-guarded writes are policy-only. Do not admit task-control
       // actions that can stop execution before the service takes its row lock.
@@ -18185,7 +18190,7 @@ export function issueRoutes(
   router.post(
     "/issues/:id/comments",
     validate(addIssueCommentSchema),
-    externalizeInlineImages(companyIdOfIssue),
+    externalizeInlineImages(scopeOfIssue),
     async (req, res) => {
       const id = req.params.id as string;
       const issue = await getAccessibleResource(
