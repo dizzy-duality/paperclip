@@ -33,7 +33,12 @@ import {
   rejectSteeredIdentity,
 } from "../services/run-identity.js";
 import { createHash, randomUUID } from "node:crypto";
-import { Router, type Request, type Response } from "express";
+import { Router, type NextFunction, type Request, type Response } from "express";
+import {
+  externalizeInlineDataImages,
+  hasInlineDataImage,
+  inlineImageAssetStore,
+} from "../services/inline-data-images.js";
 import multer from "multer";
 import { z } from "zod";
 import { and, asc, desc, eq, inArray, isNull, notInArray, sql, type SQL } from "drizzle-orm";
@@ -3384,6 +3389,9 @@ function logIssueListRequest(input: {
   });
 }
 
+// Text fields an issue write may carry; each can hold pasted base64 images.
+const INLINE_IMAGE_TEXT_FIELDS = ["description", "body", "comment"] as const;
+
 export function issueRoutes(
   db: Db,
   storage: StorageService,
@@ -4408,6 +4416,44 @@ export function issueRoutes(
       return input.activeRecoveryAction ?? null;
     }
   }
+
+  /**
+   * Moves base64 `data:` images out of a task's description or a comment into
+   * image assets before the write handler runs, so the stored text links to
+   * them instead of carrying them. Those assets keep the task's privacy.
+   */
+  function externalizeInlineImages(
+    resolveScope: (req: Request) => Promise<{ companyId: string; issueId: string | null } | null>,
+  ) {
+    return async (req: Request, _res: Response, next: NextFunction) => {
+      const body = req.body as Record<string, unknown> | undefined;
+      const fields = INLINE_IMAGE_TEXT_FIELDS.filter((field) => {
+        const value = body?.[field];
+        return typeof value === "string" && hasInlineDataImage(value);
+      });
+      if (fields.length === 0) return next();
+      const scope = await resolveScope(req);
+      // An unknown or inaccessible issue is the handler's to refuse, with the
+      // same response either way.
+      if (!scope) return next();
+      const { companyId, issueId } = scope;
+      try {
+        assertCompanyAccess(req, companyId);
+      } catch {
+        return next();
+      }
+      const store = inlineImageAssetStore(db, storage, companyId, issueId, getActorInfo(req));
+      for (const field of fields) {
+        body![field] = (await externalizeInlineDataImages(body![field] as string, store)).text;
+      }
+      next();
+    };
+  }
+  const scopeOfNewIssue = async (req: Request) => ({ companyId: req.params.companyId as string, issueId: null });
+  const scopeOfIssue = async (req: Request) => {
+    const issue = await svc.getById(req.params.id as string);
+    return issue ? { companyId: issue.companyId, issueId: issue.id } : null;
+  };
 
   function withContentPath<T extends { id: string }>(attachment: T) {
     const contentPath = `/api/attachments/${attachment.id}/content`;
@@ -10358,6 +10404,36 @@ export function issueRoutes(
     res.json({ ...doc, annotations });
   });
 
+  // The document as a Markdown file, for the Artifacts page download button.
+  router.get("/issues/:id/documents/:key/download", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await getAccessibleResource(
+      req,
+      res,
+      getIssueById(req, id),
+      "Issue not found",
+    );
+    if (!issue) return;
+    if (!(await assertIssueReadAllowed(req, res, issue))) return;
+    const keyParsed = issueDocumentKeySchema.safeParse(
+      String(req.params.key ?? "")
+        .trim()
+        .toLowerCase(),
+    );
+    if (!keyParsed.success) {
+      res.status(400).json({ error: "Invalid document key" });
+      return;
+    }
+    const doc = await documentsSvc.getIssueDocumentByKey(issue.id, keyParsed.data);
+    if (!doc) {
+      res.status(404).json({ error: "Document not found" });
+      return;
+    }
+    res.attachment(`${keyParsed.data}.md`);
+    res.type("text/markdown; charset=utf-8");
+    res.send(doc.body ?? "");
+  });
+
   router.get("/issues/:id/documents/:key/annotations", async (req, res) => {
     const id = req.params.id as string;
     const issue = await getAccessibleResource(
@@ -12116,6 +12192,7 @@ export function issueRoutes(
     "/companies/:companyId/issues",
     applyCreateIssueStatusDefault,
     validateIssueMutationBody(createIssueSchema),
+    externalizeInlineImages(scopeOfNewIssue),
     async (req, res) => {
       const companyId = req.params.companyId as string;
       assertCompanyAccess(req, companyId);
@@ -13530,6 +13607,7 @@ export function issueRoutes(
   router.patch(
     "/issues/:id",
     validateIssueMutationBody(updateIssueRouteSchema),
+    externalizeInlineImages(scopeOfIssue),
     async (req, res) => {
       // Snapshot-guarded writes are policy-only. Do not admit task-control
       // actions that can stop execution before the service takes its row lock.
@@ -18112,6 +18190,7 @@ export function issueRoutes(
   router.post(
     "/issues/:id/comments",
     validate(addIssueCommentSchema),
+    externalizeInlineImages(scopeOfIssue),
     async (req, res) => {
       const id = req.params.id as string;
       const issue = await getAccessibleResource(

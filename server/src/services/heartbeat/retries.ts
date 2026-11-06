@@ -10,6 +10,7 @@ import {
   hasConversationContinuationPolicy,
 } from "../conversation-continuation.js";
 import { legacyExecutionNeedsReconciliationWithEvidence } from "../legacy-execution-recovery.js";
+import { PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS } from "../recovery/service.js";
 import {
   executionFailureRetryCount,
   executionRetryAttemptCount,
@@ -262,6 +263,58 @@ function readTransientRetryNotBeforeFromRun(
   }
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+/**
+ * Whether an operator asked for this run explicitly: a manual run, or a
+ * scheduled retry promoted with "Retry now" (which keeps its automation
+ * source). Holds on automatic runs let these through. Retry now sets
+ * scheduledRetryAt to the request time; later retries copy the context
+ * snapshot, so a stale retryNowRequestedAt no longer matches their own
+ * scheduledRetryAt.
+ */
+export function isOperatorRequestedRun(
+  run: Pick<typeof heartbeatRuns.$inferSelect, "id" | "invocationSource" | "contextSnapshot" | "scheduledRetryAt">,
+) {
+  if (run.invocationSource === "on_demand") return true;
+  // "Resume now" names the run itself, so a retry that copies this context
+  // snapshot does not inherit the bypass.
+  if (parseObject(run.contextSnapshot).holdResumedRunId === run.id) return true;
+  const retryNowRequestedAt = readNonEmptyString(
+    parseObject(run.contextSnapshot).retryNowRequestedAt,
+  );
+  return (
+    retryNowRequestedAt !== null &&
+    run.scheduledRetryAt !== null &&
+    new Date(retryNowRequestedAt).getTime() === run.scheduledRetryAt.getTime()
+  );
+}
+
+/**
+ * When an agent's latest finished run stopped on its provider's usage limit,
+ * the time until which it should get no new automatic runs: the reset time the
+ * adapter parsed from the provider's message, or else the default quota
+ * backoff after that run (the same wait task recovery uses). Null when the
+ * latest finished run was not a usage-limit stop.
+ */
+export function providerQuotaHoldUntil(
+  latestFinishedRun: Pick<
+    typeof heartbeatRuns.$inferSelect,
+    "errorCode" | "resultJson" | "finishedAt"
+  > | null,
+): Date | null {
+  if (
+    !latestFinishedRun?.finishedAt ||
+    readHeartbeatRunErrorFamily(latestFinishedRun) !== "provider_quota"
+  )
+    return null;
+  return (
+    readTransientRetryNotBeforeFromRun(latestFinishedRun) ??
+    new Date(
+      latestFinishedRun.finishedAt.getTime() +
+        PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS,
+    )
+  );
 }
 
 export function readTransientRecoveryContractFromRun(

@@ -217,6 +217,8 @@ export const connectionGrants = pgTable(
         userId: string;
         login: string;
         avatarUrl?: string;
+        /** Absent for GitHub App (OAuth) grants; PATs have no installations. */
+        credentialKind?: "personal_access_token";
         installationCount: number;
         repositoryCount: number;
         repositorySelection: "all" | "selected" | "mixed" | "none";

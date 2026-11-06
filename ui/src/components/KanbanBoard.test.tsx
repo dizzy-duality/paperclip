@@ -222,6 +222,16 @@ describe("KanbanBoard", () => {
     expect(container.textContent).toContain("Live");
   });
 
+  it("shows the operator a card is assigned to", () => {
+    const issue = { ...createIssue(2, "in_review"), assigneeUserId: "user-1" };
+    const { container } = renderBoard({
+      issues: [issue],
+      userAssignee: (userId) => ({ name: userId === "user-1" ? "Rob" : "?", avatarUrl: null }),
+    });
+
+    expect(container.textContent).toContain("Rob");
+  });
+
   it("resolves drop targets from status rails and cards", () => {
     const issues = [
       createIssue(1, "todo"),

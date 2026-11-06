@@ -105,8 +105,9 @@ function capabilityForAgent(agent: AgentBinding): RunnerGoalCapability {
       reason,
     };
   }
+  // dd: Claude and Codex agents without an engine run the CLI (see their acp.ts).
   const directAcp = (agent.adapterType === "codex_local" || agent.adapterType === "claude_local")
-    && engine !== "cli" && sessionMode !== "oneshot";
+    && engine === "acp" && sessionMode !== "oneshot";
   const reason = agent.adapterType === "opencode_local"
     ? "Unsupported by OpenCode."
     : directAcp

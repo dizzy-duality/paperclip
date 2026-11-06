@@ -20,7 +20,7 @@ const dueAt = new Date(now.getTime() - 60_000);
 const admitted = { id: "admitted-run" } as Run;
 const timerPolicy = {
   enabled: false, intervalSec: 60, wakeOnDemand: true, maxConcurrentRuns: 1,
-  skipTimerWhenNoActionableWork: false, maxDailyRuns: null, maxDailyCostCents: null,
+  skipTimerWhenNoActionableWork: false, maxDailyRuns: null, maxDailyCostCents: null, activeHours: null,
 };
 
 function callbacks(db: Db) {

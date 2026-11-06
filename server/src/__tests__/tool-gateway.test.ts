@@ -4349,6 +4349,39 @@ rl.on("line", (line) => {
     },
   ];
 
+  it("bounds a remote MCP call that names no timeout by PAPERCLIP_TOOL_TIMEOUT_MS", async () => {
+    vi.stubEnv("PAPERCLIP_TOOL_TIMEOUT_MS", "10");
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const { run } = await createIssueAndRun(db, company.id, agent.id);
+    const fake = await startFakeRemoteMcpServer(() => ({
+      delayMs: 75,
+      body: { jsonrpc: "2.0", id: "slow", result: { content: [{ type: "text", text: "late" }] } },
+    }));
+    try {
+      await createRemoteMcpTool(db, company.id, { applicationKey: "default-timeout", toolName: "kv_set", url: fake.url });
+      await allowAllToolsForAgent(db, company.id, agent.id);
+      const gateway = createTestToolGatewayService(db);
+      const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+      const connectedTool = (await gateway.listToolsForSession(session.token))
+        .find((tool) => tool.providerType === "mcp_remote_http");
+
+      await gateway.executeTool({
+        sessionToken: session.token,
+        tool: connectedTool!.name,
+        parameters: { key: "alpha", value: "one" },
+      }).then(
+        () => {
+          throw new Error("Expected the configured default timeout to cut the call off");
+        },
+        (error) => expectGatewayError(error, 504, "tool_timeout"),
+      );
+    } finally {
+      vi.unstubAllEnvs();
+      await fake.close();
+    }
+  });
+
   for (const scenario of remoteFailureCases) {
     it(`returns a controlled gateway error for remote MCP ${scenario.name}`, async () => {
       const company = await createCompany(db);

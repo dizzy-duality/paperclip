@@ -8,6 +8,7 @@ import {
   agents,
 } from "@paperclipai/db";
 import {
+  isWithinActiveHours,
   type IssueExecutionMonitorPolicy,
   type IssueExecutionMonitorClearReason,
   type IssueExecutionMonitorRecoveryPolicy,
@@ -1182,6 +1183,7 @@ export function createHeartbeatScheduling(
         if (!invokability.invokable) continue;
         const policy = parseHeartbeatPolicy(agent);
         if (!policy.enabled || policy.intervalSec <= 0) continue;
+        if (policy.activeHours && !isWithinActiveHours(policy.activeHours, now)) continue;
 
         if (cutoff) {
           const eligibleIssue = await db
