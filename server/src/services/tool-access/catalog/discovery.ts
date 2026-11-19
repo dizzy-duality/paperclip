@@ -150,7 +150,8 @@ export function createToolCatalogDiscovery(db: Db, { now, audit, secrets, creden
       // `tools/list` is read-only, so a 400 can safely be retried after the MCP
       // initialize handshake. Stateful servers such as Supabase require the
       // returned Mcp-Session-Id on every non-initialization request.
-      if (response.status === 400) {
+      // dd: Obot's gateway answers a sessionless request with 405 instead.
+      if (response.status === 400 || response.status === 405) {
         try {
           const sessionHeaders = await initializeMcpHttpSession({
             send: sendRemote,

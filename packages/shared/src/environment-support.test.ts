@@ -29,6 +29,13 @@ describe("isSandboxProviderSupportedForAdapter", () => {
     ).toBe(false);
   });
 
+  it("treats our add-on agy_local adapter as remote-managed so it runs in sandbox pods", () => {
+    expect(adapterSupportsRemoteManagedEnvironments("agy_local")).toBe(true);
+    expect(
+      isSandboxProviderSupportedForAdapter("agy_local", "kubernetes", ["kubernetes"]),
+    ).toBe(true);
+  });
+
   it("treats grok_local as a remote-managed local adapter", () => {
     expect(adapterSupportsRemoteManagedEnvironments("grok_local")).toBe(true);
     expect(supportedEnvironmentDriversForAdapter("grok_local")).toEqual(["local", "ssh", "sandbox"]);
