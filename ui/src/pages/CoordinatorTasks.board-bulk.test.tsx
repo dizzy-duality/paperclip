@@ -27,10 +27,13 @@ vi.mock("../hooks/useCombinedInboxTasksEnabled", () => ({ useCombinedInboxTasksE
 vi.mock("../context/CompanyContext", () => ({ useCompany: () => ({ selectedCompanyId: "company", selectedCompany: { issuePrefix: "ORG" } }) }));
 vi.mock("../context/DialogContext", () => ({ useDialogActions: () => ({ openNewIssue: vi.fn() }) }));
 vi.mock("../context/BreadcrumbContext", () => ({ useBreadcrumbs: () => ({ setBreadcrumbs: vi.fn() }) }));
-vi.mock("@/components/TaskListToolbar", () => ({ TaskListToolbar: ({ onLayoutChange }: { onLayoutChange: (layout: "list" | "board") => void }) =>
-  <button onClick={() => onLayoutChange("board")}>Board view</button> }));
+vi.mock("@/components/TaskListToolbar", () => ({ TaskListToolbar: ({ onLayoutChange, filters }: { onLayoutChange: (layout: "list" | "board") => void; filters: { onChange: (patch: { statuses: string[] }) => void } }) => <>
+  <button onClick={() => onLayoutChange("board")}>Board view</button>
+  <button onClick={() => filters.onChange({ statuses: ["todo"] })}>Todo only</button>
+</> }));
 
-const issues = [
+let issues: ReturnType<typeof createIssue>[] = [];
+const flatIssues = [
   createIssue({ id: "task-a", identifier: "ORG-1", title: "Measure the window", companyId: "company", parentId: null, status: "todo", assigneeAgentId: null, assigneeUserId: "operator-1" }),
   createIssue({ id: "task-b", identifier: "ORG-2", title: "Order the glass", companyId: "company", parentId: null, status: "todo", assigneeAgentId: null, assigneeUserId: null }),
   createIssue({ id: "task-c", identifier: "ORG-3", title: "Fit the glass", companyId: "company", parentId: null, status: "todo", assigneeAgentId: null, assigneeUserId: null }),
@@ -41,6 +44,7 @@ describe("default Tasks page (Coordinator workspace)", () => {
   beforeEach(() => {
     vi.clearAllMocks(); localStorage.clear();
     mocks.designSandbox = false;
+    issues = flatIssues;
     mocks.list.mockImplementation(async (_company: string, filters: { ids?: string[]; unreadForUserId?: string }) =>
       filters.unreadForUserId ? [] : filters.ids ? issues.filter(issue => filters.ids!.includes(issue.id)) : issues);
     mocks.update.mockResolvedValue({});
@@ -89,5 +93,48 @@ describe("default Tasks page (Coordinator workspace)", () => {
     await vi.waitFor(() => expect(button("Builder")).toBeDefined());
     await act(async () => { button("Builder")!.click(); });
     await vi.waitFor(() => expect(mocks.update.mock.calls).toEqual([["task-b", { assigneeAgentId: "agent-1", assigneeUserId: null }]]));
+  });
+
+  // A parent with two subtasks; only the subtasks and a loose task are "todo".
+  const tree = [
+    createIssue({ id: "parent", identifier: "ORG-10", title: "Replace the shopfront", companyId: "company", parentId: null, status: "in_progress", assigneeAgentId: null, assigneeUserId: null }),
+    createIssue({ id: "child-1", identifier: "ORG-11", title: "Remove the old pane", companyId: "company", parentId: "parent", status: "todo", assigneeAgentId: null, assigneeUserId: null }),
+    createIssue({ id: "child-2", identifier: "ORG-12", title: "Seal the frame", companyId: "company", parentId: "parent", status: "todo", assigneeAgentId: null, assigneeUserId: null }),
+    createIssue({ id: "loose", identifier: "ORG-13", title: "Order the glass", companyId: "company", parentId: null, status: "todo", assigneeAgentId: null, assigneeUserId: null }),
+  ];
+  async function setStatus(label: string) {
+    act(() => { button("Set status")!.click(); });
+    await vi.waitFor(() => expect(button(label)).toBeDefined());
+    await act(async () => { button(label)!.click(); });
+  }
+
+  it("drops a selected subtask from the selection when its parent is collapsed", async () => {
+    issues = tree;
+    await mount();
+    await vi.waitFor(() => expect(box("Select ORG-11")).not.toBeNull());
+    act(() => { box("Select ORG-11")!.click(); });
+    expect(host.querySelector("[aria-label='Selected tasks']")?.textContent).toContain("1 selected");
+    act(() => { box("Collapse Replace the shopfront")!.click(); });
+    await vi.waitFor(() => expect(box("Select ORG-11")).toBeNull());
+    expect(host.querySelector("[aria-label='Selected tasks']")).toBeNull();
+
+    act(() => { box("Select ORG-13")!.click(); });
+    expect(host.querySelector("[aria-label='Selected tasks']")?.textContent).toContain("1 selected");
+    await setStatus("Done");
+    await vi.waitFor(() => expect(mocks.update.mock.calls).toEqual([["loose", { status: "done" }]]));
+  });
+
+  it("selects all shown matching rows but not the parent shown only for context", async () => {
+    issues = tree;
+    await mount();
+    act(() => { button("Todo only")!.click(); });
+    await vi.waitFor(() => expect(host.textContent).toContain("Replace the shopfront"));
+    expect(box("Select ORG-10")).toBeNull();
+    act(() => { box("Select ORG-13")!.click(); });
+    act(() => { box("Select all 3 shown tasks")!.click(); });
+    await vi.waitFor(() => expect(host.querySelector("[aria-label='Selected tasks']")?.textContent).toContain("3 selected"));
+    await setStatus("Done");
+    await vi.waitFor(() => expect(mocks.update).toHaveBeenCalledTimes(3));
+    expect(mocks.update.mock.calls.map(([id]) => id).sort()).toEqual(["child-1", "child-2", "loose"]);
   });
 });

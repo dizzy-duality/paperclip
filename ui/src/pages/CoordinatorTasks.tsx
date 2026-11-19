@@ -267,7 +267,22 @@ export function CoordinatorTasks({ viewControl }: { viewControl?: ReactNode } = 
   );
   const enrichItem = (item: TaskListItem): TaskListItem => ({ ...item, issue: enrichIssueRow(item.issue) });
   const listItems = needsAttention ? collection.matchingItems : collection.visibleItems;
-  const selection = useIssueSelection(collection.layout === "list" ? listItems.map(item => item.issue) : []);
+  // Only rows on screen can be selected: matching tasks (not parents shown for
+  // context) outside collapsed branches. Rows that leave the screen leave the
+  // count and the bulk action with them.
+  const listById = new Map(listItems.map(item => [item.issue.id, item.issue]));
+  const matchingIds = new Set(collection.matchingItems.map(item => item.issue.id));
+  const insideCollapsed = (issue: Issue) => {
+    const seen = new Set<string>();
+    for (let parent = listById.get(issue.parentId ?? ""); parent && !seen.has(parent.id); parent = listById.get(parent.parentId ?? "")) {
+      if (collection.collapsedIds.has(parent.id)) return true;
+      seen.add(parent.id);
+    }
+    return false;
+  };
+  const selectableIssues = collection.layout === "list"
+    ? listItems.map(item => item.issue).filter(issue => matchingIds.has(issue.id) && !insideCollapsed(issue)) : [];
+  const selection = { ...useIssueSelection(selectableIssues), selectableIds: new Set(selectableIssues.map(issue => issue.id)) };
   const narrowed = query || collection.activeFilterCount || view === "inbox" || view === "unread";
   const empty = <EmptyState icon={narrowed ? SearchX : ListChecks}
     message={narrowed ? "No tasks match this view" : needsAttention ? "No tasks need a decision." : "No tasks in this organization"}
