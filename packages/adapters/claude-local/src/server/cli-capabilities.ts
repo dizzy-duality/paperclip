@@ -37,6 +37,8 @@ function cacheKeyForTarget(command: string, target: AdapterExecutionTarget | nul
 
 export function minimumClaudeCliVersionForModel(model: string): string | null {
   const modelId = model.trim().replace(/\[1m\]$/, "").replace(/^(?:(?:us|eu|apac|global)\.)?anthropic\./, "");
+  // Claude Code 2.1.321 changelog: "Added Claude Fable 5.2 (`claude-fable-5-2`)".
+  if (modelId === "claude-fable-5-2") return "2.1.321";
   if (modelId === "claude-opus-5-5") return "2.1.280";
   if (modelId === "claude-sonnet-5-5") return "2.1.284";
   return modelId === "claude-fable-5-1"

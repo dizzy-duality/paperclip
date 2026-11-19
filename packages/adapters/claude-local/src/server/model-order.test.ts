@@ -36,6 +36,24 @@ describe("sortClaudeModels", () => {
     ]);
   });
 
+  it("leads with Fable 5.2 and moves Fable 5.1 to the older releases", () => {
+    const discovered = [
+      { id: "claude-opus-5-5", label: "Claude Opus 5.5" },
+      { id: "claude-fable-5-1", label: "Claude Fable 5.1" },
+      { id: "claude-fable-5-2", label: "Claude Fable 5.2" },
+    ];
+
+    expect(ids(sortClaudeModels(discovered))).toEqual([
+      "claude-fable-5-2",
+      "claude-opus-5-5",
+      "claude-fable-5-1",
+    ]);
+    expect(ids(sortClaudeModels([
+      { id: "us.anthropic.claude-fable-5-1", label: "Bedrock Fable 5.1" },
+      { id: "global.anthropic.claude-fable-5-2", label: "Bedrock Fable 5.2" },
+    ]))).toEqual(["global.anthropic.claude-fable-5-2", "us.anthropic.claude-fable-5-1"]);
+  });
+
   it("orders dated snapshots of one release newest first, after the bare alias", () => {
     const snapshots = [
       { id: "claude-sonnet-4-5-20250929", label: "Claude Sonnet 4.5 (Sep)" },
