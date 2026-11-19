@@ -172,6 +172,18 @@ describeEmbeddedPostgres("provider quota hold on queued runs", () => {
     expect(await startedAfterResume(runId)).toBe(true);
   });
 
+  it("leaves a non-manual on-demand run to upstream's provider limit wait", async () => {
+    const ids = await insertAgent();
+    await insertFinishedRun(ids, new Date(Date.now() - 60_000), quotaStop(new Date(Date.now() + HOUR_MS)));
+    const runId = await insertQueuedRun(ids, "on_demand");
+    await db.update(heartbeatRuns).set({ triggerDetail: "callback" }).where(eq(heartbeatRuns.id, runId));
+
+    expect(await startedAfterResume(runId)).toBe(false);
+    const [row] = await db.select({ errorCode: heartbeatRuns.errorCode }).from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId));
+    expect(row?.errorCode).toBe("provider_limit_wait");
+  });
+
   it("still starts a scheduled retry the board promoted with Retry now", async () => {
     const ids = await insertAgent();
     await insertFinishedRun(ids, new Date(Date.now() - 60_000), quotaStop(new Date(Date.now() + HOUR_MS)));

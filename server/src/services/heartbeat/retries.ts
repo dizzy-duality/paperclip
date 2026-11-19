@@ -320,7 +320,16 @@ function readTransientRetryNotBeforeFromRun(
 export function isOperatorRequestedRun(
   run: Pick<typeof heartbeatRuns.$inferSelect, "id" | "invocationSource" | "contextSnapshot" | "scheduledRetryAt">,
 ) {
-  if (run.invocationSource === "on_demand") return true;
+  return run.invocationSource === "on_demand" || isOperatorResumedRun(run);
+}
+
+/**
+ * A run the board resumed past a hold: "Resume now" (holdResumedRunId names
+ * the run itself) or a scheduled retry promoted with "Retry now".
+ */
+export function isOperatorResumedRun(
+  run: Pick<typeof heartbeatRuns.$inferSelect, "id" | "contextSnapshot" | "scheduledRetryAt">,
+) {
   // "Resume now" names the run itself, so a retry that copies this context
   // snapshot does not inherit the bypass.
   if (parseObject(run.contextSnapshot).holdResumedRunId === run.id) return true;
