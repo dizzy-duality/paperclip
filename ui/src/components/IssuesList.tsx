@@ -107,8 +107,8 @@ import { taskDateGroup, taskDateGroupSeparator, type TaskDateGroup } from "../li
 import { deriveOriginatingActor, ISSUE_STATUSES, ISSUE_DISPLAY_STATUSES, type Issue, type IssueDisplayStatus, type IssueStatus, type Project } from "@paperclipai/shared";
 import { Badge } from "@/components/ui/badge";
 import { taskStatusIconProps } from "@/lib/task-status-presentation";
-import { Checkbox } from "@/components/ui/checkbox";
-import { IssuesBulkBar } from "./IssuesBulkBar";
+import { IssueSelectBox, IssuesBulkBar } from "./IssuesBulkBar";
+import { useIssueSelection } from "../hooks/useIssueSelection";
 const ISSUE_SEARCH_DEBOUNCE_MS = 250;
 const ISSUE_SEARCH_RESULT_LIMIT = 200;
 const ISSUE_BOARD_COLUMN_RESULT_LIMIT = 200;
@@ -838,7 +838,6 @@ function StreamlinedIssuesList({
       ? previous : { ...previous, showAgentCreatedTasks });
   }, [enableAgentCreatedVisibilityFilter, showAgentCreatedTasks]);
   const [assigneePickerIssueId, setAssigneePickerIssueId] = useState<string | null>(null);
-  const [selectedIssueIds, setSelectedIssueIds] = useState<ReadonlySet<string>>(() => new Set());
   const [assigneeSearch, setAssigneeSearch] = useState("");
   const [issueSearch, setIssueSearch] = useState(initialSearch ?? "");
   const [renderedIssueRowLimit, setRenderedIssueRowLimit] = useState(INITIAL_ISSUE_ROW_RENDER_LIMIT);
@@ -1270,27 +1269,10 @@ function StreamlinedIssuesList({
   ]);
 
   // Bulk actions apply to selected tasks the current view still shows.
-  const selectedIssues = useMemo(
-    () => filtered.filter((issue) => selectedIssueIds.has(issue.id)),
-    [filtered, selectedIssueIds],
-  );
-  const selectionActive = selectedIssues.length > 0;
-  const setIssueSelected = useCallback((issueId: string, on: boolean) => {
-    setSelectedIssueIds((previous) => {
-      const next = new Set(previous);
-      if (on) next.add(issueId); else next.delete(issueId);
-      return next;
-    });
-  }, []);
+  const selection = useIssueSelection(filtered);
   const renderSelectBox = (issue: Issue) => (
-    <span className="inline-flex shrink-0 items-center" onClick={(event) => { event.stopPropagation(); }}>
-      <Checkbox
-        checked={selectedIssueIds.has(issue.id)}
-        onCheckedChange={(value) => setIssueSelected(issue.id, value === true)}
-        aria-label={`Select ${issue.identifier ?? issue.title}`}
-        className={cn(!selectionActive && "sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100")}
-      />
-    </span>
+    <IssueSelectBox issue={issue} checked={selection.selectedIds.has(issue.id)}
+      selectionActive={selection.active} onCheckedChange={selection.setSelected} />
   );
 
   const progressSummary = useMemo(
@@ -2147,20 +2129,8 @@ function StreamlinedIssuesList({
         />
       )}
 
-      {viewState.viewMode === "list" && selectionActive && selectedCompanyId ? (
-        <IssuesBulkBar
-          companyId={selectedCompanyId}
-          selected={selectedIssues}
-          shownCount={filtered.length}
-          agents={agents}
-          onSelectAllShown={() => setSelectedIssueIds(new Set(filtered.map((issue) => issue.id)))}
-          onClear={() => setSelectedIssueIds(new Set())}
-          onSettled={(updatedIds) => setSelectedIssueIds((previous) => {
-            const next = new Set(previous);
-            for (const id of updatedIds) next.delete(id);
-            return next;
-          })}
-        />
+      {viewState.viewMode === "list" && selection.active && selectedCompanyId ? (
+        <IssuesBulkBar companyId={selectedCompanyId} agents={agents} {...selection.bulkBarProps} />
       ) : null}
 
       {!collectionLoading && !error && !externalObjectFilterError && (viewState.viewMode === "board" ? (

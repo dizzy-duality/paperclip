@@ -10,6 +10,7 @@ import { heartbeatsApi } from "@/api/heartbeats";
 import { issuesApi } from "@/api/issues";
 import { projectsApi } from "@/api/projects";
 import { EmptyState } from "@/components/EmptyState";
+import { IssuesBulkBar } from "@/components/IssuesBulkBar";
 import { KanbanBoard } from "@/components/KanbanBoard";
 import { TaskList, type TaskListItem } from "@/components/TaskList";
 import { TaskListToolbar } from "@/components/TaskListToolbar";
@@ -21,11 +22,12 @@ import { useCompany } from "@/context/CompanyContext";
 import { useDialogActions } from "@/context/DialogContext";
 import { useTaskListCollection } from "@/hooks/useTaskListCollection";
 import { useIssueRowDetails } from "@/hooks/useIssueRowDetails";
+import { useIssueSelection } from "@/hooks/useIssueSelection";
 import { useCoordinatorWorkspaceEnabled } from "@/hooks/useCoordinatorWorkspaceEnabled";
 import { usePublishSharedQueryData, useSharedPollingQuery } from "@/hooks/useSharedPolling";
 import { collectLiveIssueIds } from "@/lib/liveIssueIds";
-import { formatUserLabel } from "@/lib/assignees";
-import { buildCompanyUserProfileMap } from "@/lib/company-members";
+import { formatUserLabel, userAssigneeLookup } from "@/lib/assignees";
+import { buildCompanyUserLabelMap, buildCompanyUserProfileMap } from "@/lib/company-members";
 import { coordinatorAttentionTasksQueryKey } from "@/lib/coordinator-attention";
 import { createIssueDetailLocationState } from "@/lib/issueDetailBreadcrumb";
 import { defaultIssueFilterState, type IssueFilterState } from "@/lib/issue-filters";
@@ -157,6 +159,7 @@ export function CoordinatorTasks({ viewControl }: { viewControl?: ReactNode } = 
   const liveRuns = useQuery({ queryKey: queryKeys.liveRuns(companyId!), queryFn: () => heartbeatsApi.liveRunsForCompany(companyId!), enabled: sharedLiveRuns.enabled, refetchInterval: sharedLiveRuns.refetchInterval });
   usePublishSharedQueryData(sharedLiveRuns, liveRuns.data, liveRuns.dataUpdatedAt);
   const users = buildCompanyUserProfileMap(directory.data?.users);
+  const userAssignee = userAssigneeLookup(userId, buildCompanyUserLabelMap(directory.data?.users), users);
   const agentById = new Map(agents.data?.map(agent => [agent.id, agent]));
   const projectById = new Map(projects.data?.map(project => [project.id, project]));
   const records = (needsAttention ? attentionTasks.flatMap(task => task.data ?? []) : tasks.data?.pages.flatMap(page => page.items) ?? []) as Issue[];
@@ -263,6 +266,8 @@ export function CoordinatorTasks({ viewControl }: { viewControl?: ReactNode } = 
     recordsWithContext,
   );
   const enrichItem = (item: TaskListItem): TaskListItem => ({ ...item, issue: enrichIssueRow(item.issue) });
+  const listItems = needsAttention ? collection.matchingItems : collection.visibleItems;
+  const selection = useIssueSelection(collection.layout === "list" ? listItems.map(item => item.issue) : []);
   const narrowed = query || collection.activeFilterCount || view === "inbox" || view === "unread";
   const empty = <EmptyState icon={narrowed ? SearchX : ListChecks}
     message={narrowed ? "No tasks match this view" : needsAttention ? "No tasks need a decision." : "No tasks in this organization"}
@@ -289,13 +294,14 @@ export function CoordinatorTasks({ viewControl }: { viewControl?: ReactNode } = 
     {rowDetailsError ? <div role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><span>Task details couldn’t load.</span><Button variant="ghost" size="sm" onClick={() => void retryRowDetails()}>Retry</Button></div> : null}
     {pending ? <p role="status" className="text-sm text-muted-foreground">Loading tasks…</p> : !error && <>
       <div hidden={collection.layout !== "list"} className="design-task-list-panel">{collection.matchingItems.length ? <TaskList key={companyId}
-        items={(needsAttention ? collection.matchingItems : collection.visibleItems).map(enrichItem)} allItems={collection.companyItems.map(enrichItem)}
+        items={listItems.map(enrichItem)} selection={selection} allItems={collection.companyItems.map(enrichItem)}
         preferenceLocation={userId ? { companyId, collectionKey: `coordinator-tasks:${userId}` } : undefined}
         collectionKey={JSON.stringify([companyId, userId, needsAttention, deferredQuery, participantAgentId, workspaceIds, collection.view, collection.filters])}
         sort={sort} onSortChange={setSort}
         issueLinkState={issueLinkState} collapsedIds={collection.collapsedIds} onCollapsedIdsChange={collection.setCollapsedIds} /> : empty}</div>
       {collection.layout === "board" ? collection.matchingItems.length
-        ? <KanbanBoard showOverflowFades issues={collection.matchingItems.map(item => enrichIssueRow(item.issue))} agents={agents.data} onUpdateIssue={(id, data) => update.mutate({ id, data })} /> : empty : null}
+        ? <KanbanBoard showOverflowFades issues={collection.matchingItems.map(item => enrichIssueRow(item.issue))} agents={agents.data} userAssignee={userAssignee} onUpdateIssue={(id, data) => update.mutate({ id, data })} /> : empty : null}
+      {collection.layout === "list" && selection.active ? <IssuesBulkBar companyId={companyId} agents={agents.data} {...selection.bulkBarProps} /> : null}
       {!needsAttention && tasks.hasNextPage ? <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground"><span>{view === "unread" ? unreadIds.size : items.length} tasks loaded. Load more to include them in filters.</span><Button variant="outline" size="sm" disabled={tasks.isFetchingNextPage} onClick={() => void tasks.fetchNextPage()}>{tasks.isFetchingNextPage ? "Loading…" : "Load more tasks"}</Button></div> : null}
     </>}
   </section></TruncatedTextMarqueeProvider></FlyoutAppearanceProvider>;

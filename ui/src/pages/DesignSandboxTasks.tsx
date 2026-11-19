@@ -16,8 +16,8 @@ import { useBreadcrumbs } from "@/context/BreadcrumbContext";
 import { useCompany } from "@/context/CompanyContext";
 import { useDialogActions } from "@/context/DialogContext";
 import { useTaskListCollection } from "@/hooks/useTaskListCollection";
-import { formatUserLabel } from "@/lib/assignees";
-import { buildCompanyUserProfileMap } from "@/lib/company-members";
+import { formatUserLabel, userAssigneeLookup } from "@/lib/assignees";
+import { buildCompanyUserLabelMap, buildCompanyUserProfileMap } from "@/lib/company-members";
 import { queryKeys } from "@/lib/queryKeys";
 import { taskListViewStorageKey } from "@/lib/task-list-views";
 import type { Issue } from "@paperclipai/shared";
@@ -68,6 +68,7 @@ export function DesignSandboxTasks() {
     enabled: !!companyId && !!userId,
   });
   const users = buildCompanyUserProfileMap(directory.data?.users);
+  const userAssignee = userAssigneeLookup(userId, buildCompanyUserLabelMap(directory.data?.users), users);
   const agentById = new Map(agents.data?.map(agent => [agent.id, agent]));
   const projectById = new Map(projects.data?.map(project => [project.id, project]));
   const items: TaskListItem[] = [...new Map((tasks.data?.pages.flat() ?? []).map(issue => [issue.id, issue])).values()].map(issue => ({
@@ -101,7 +102,7 @@ export function DesignSandboxTasks() {
     {tasks.isPending ? <p role="status" className="text-sm text-muted-foreground">Loading tasks…</p> : <>
       {collection.narrowed ? <p role="status" className="design-task-results">{collection.matchingItems.length} matching tasks{collection.layout === "list" && collection.visibleItems.length > collection.matchingItems.length ? " · Parent tasks included for context" : ""}</p> : null}
       <div hidden={collection.layout !== "list"} className="design-task-list-panel"><TaskList key={companyId} items={collection.visibleItems} allItems={collection.companyItems} collapsedIds={collection.collapsedIds} onCollapsedIdsChange={collection.setCollapsedIds} emptyState={empty} /></div>
-      {collection.layout === "board" ? collection.matchingItems.length ? <KanbanBoard showOverflowFades issues={collection.matchingItems.map(item => item.issue)} agents={agents.data} onUpdateIssue={(id, data) => update.mutate({ id, data })} /> : empty : null}
+      {collection.layout === "board" ? collection.matchingItems.length ? <KanbanBoard showOverflowFades issues={collection.matchingItems.map(item => item.issue)} agents={agents.data} userAssignee={userAssignee} onUpdateIssue={(id, data) => update.mutate({ id, data })} /> : empty : null}
       {tasks.hasNextPage ? <div className="flex items-center gap-3 text-sm text-muted-foreground"><span>Search, views and filters cover the {items.length} loaded tasks.</span><Button variant="outline" size="sm" disabled={tasks.isFetchingNextPage} onClick={() => void tasks.fetchNextPage()}>{tasks.isFetchingNextPage ? "Loading…" : "Load more tasks"}</Button></div> : null}
     </>}
   </div></TruncatedTextMarqueeProvider>;

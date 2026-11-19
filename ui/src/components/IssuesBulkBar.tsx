@@ -6,12 +6,33 @@ import { queryKeys } from "../lib/queryKeys";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { cn } from "../lib/utils";
 import { StatusIcon } from "./StatusIcon";
 
 const STATUSES = ["backlog", "todo", "in_progress", "in_review", "done", "cancelled", "blocked"];
 
 function statusLabel(status: string) {
   return status.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/** The row checkbox that adds a task to the bulk selection. Hidden until hover
+ * on wide screens while nothing is selected. */
+export function IssueSelectBox({ issue, checked, selectionActive, onCheckedChange }: {
+  issue: Pick<Issue, "id" | "identifier" | "title">;
+  checked: boolean;
+  selectionActive: boolean;
+  onCheckedChange: (issueId: string, checked: boolean) => void;
+}) {
+  return (
+    <span className="inline-flex shrink-0 items-center" onClick={(event) => { event.stopPropagation(); }}>
+      <Checkbox
+        checked={checked}
+        onCheckedChange={(value) => onCheckedChange(issue.id, value === true)}
+        aria-label={`Select ${issue.identifier ?? issue.title}`}
+        className={cn(!selectionActive && "sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100")}
+      />
+    </span>
+  );
 }
 
 /**
