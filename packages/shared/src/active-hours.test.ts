@@ -40,4 +40,16 @@ describe("active hours", () => {
     // Start === end is never open.
     expect(nextActiveHoursOpening({ start: "09:00", end: "09:00", timezone: "UTC" }, new Date("2026-07-15T00:00:00Z"))).toBeNull();
   });
+
+  it("finds the repeated-hour opening on a DST fall-back night", () => {
+    // Europe/Amsterdam, Sunday 2026-10-25: 03:00 CEST (01:00Z) becomes 02:00 CET.
+    // A window ending at 02:30 closes at 02:30 CEST (00:30Z) and reopens when
+    // the clock falls back to 02:00 CET (01:00Z), not at tonight's 23:00.
+    const late = { start: "23:00", end: "02:30", timezone: "Europe/Amsterdam" };
+    expect(isWithinActiveHours(late, new Date("2026-10-25T00:30:00Z"))).toBe(false);
+    expect(nextActiveHoursOpening(late, new Date("2026-10-25T00:30:00Z"))).toEqual(new Date("2026-10-25T01:00:00Z"));
+    expect(nextActiveHoursOpening(late, new Date("2026-10-25T00:45:30Z"))).toEqual(new Date("2026-10-25T01:00:00Z"));
+    // After the repeated half hour closes (02:30 CET = 01:30Z): tonight's 23:00 CET.
+    expect(nextActiveHoursOpening(late, new Date("2026-10-25T01:30:00Z"))).toEqual(new Date("2026-10-25T22:00:00Z"));
+  });
 });

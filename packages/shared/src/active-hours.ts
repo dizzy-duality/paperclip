@@ -65,13 +65,20 @@ export function nextActiveHoursOpening(hours: ActiveHours, from: Date): Date | n
   const current = Number(parts.find((part) => part.type === "hour")?.value ?? 0) * 60
     + Number(parts.find((part) => part.type === "minute")?.value ?? 0);
   const startOfMinute = Math.floor(from.getTime() / minute) * minute;
-  // Jump to the local start time, then walk minute by minute across any DST
-  // shift that moved it (at most a few hours; 48 h bounds the search).
+  // An opening is either the local start time (moved by at most a few hours
+  // if a DST shift falls near it) or a fall-back that sets the clock back into
+  // the window; that happens within a few hours of the clock passing `end`,
+  // so before `from` + 180 min. Search those two spans in time order, then the
+  // whole 48 h as a bound.
   const guess = startOfMinute + (((minutesOfDay(hours.start) - current) % 1440 + 1440) % 1440) * minute;
-  for (const base of [guess - 180 * minute, startOfMinute]) {
-    for (let at = Math.max(base, startOfMinute + minute); at <= startOfMinute + 2 * 1440 * minute; at += minute) {
+  const first = startOfMinute + minute;
+  for (const [base, last] of [
+    [first, startOfMinute + 180 * minute],
+    [guess - 180 * minute, guess + 180 * minute],
+    [first, startOfMinute + 2 * 1440 * minute],
+  ] as const) {
+    for (let at = Math.max(base, first); at <= last; at += minute) {
       if (isWithinActiveHours(hours, new Date(at))) return new Date(at);
-      if (base !== startOfMinute && at > guess + 180 * minute) break;
     }
   }
   return null;
