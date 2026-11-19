@@ -14,6 +14,7 @@ import {
   isGitHubHttpsRemoteUrl,
   resolveGitHubApiCredential,
   scrubGitCredentialText,
+  githubGrantIdentitySource,
 } from "../services/git-credentials.ts";
 
 const fakeDb = null as unknown as Db;
@@ -441,5 +442,13 @@ describe("createIssueGitRemoteAuthProvider", () => {
     const create = vi.fn(() => vi.fn(async () => null)) as unknown as typeof createGitRemoteAuthProvider;
     await createIssueGitRemoteAuthProvider(db, "company-1", "issue-1", create)(githubUrl);
     expect(create).toHaveBeenCalledWith(db, "company-1", { issueId: "issue-1", responsibleUserId: null, agentId: null });
+  });
+});
+
+describe("githubGrantIdentitySource", () => {
+  it("names a member's grant reached without that member as delegated", () => {
+    expect(githubGrantIdentitySource({ kind: "agent", subjectUserId: null }, null)).toBe("dedicated");
+    expect(githubGrantIdentitySource({ kind: "user", subjectUserId: "A" }, "A")).toBe("personal");
+    expect(githubGrantIdentitySource({ kind: "user", subjectUserId: "A" }, null)).toBe("delegated");
   });
 });

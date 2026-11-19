@@ -4,6 +4,7 @@ import { logger } from "../../middleware/logger.js";
 import { AI_CONNECTION_POOL_WAIT_RETRY_REASON } from "../../modules/run-dispatch/index.js";
 import { agentProviderLimitCooldown } from "../native-runtime/native-startup-retry.js";
 import { parseObject } from "../../adapters/utils.js";
+import { isOperatorResumedRun } from "./retries.js";
 
 type HeartbeatRun = typeof heartbeatRuns.$inferSelect;
 type Agent = typeof agents.$inferSelect;
@@ -44,6 +45,9 @@ export function createProviderLimitWait(db: Db, deps: ProviderLimitWaitDependenc
   ): Promise<boolean> {
     if (options.resumingAdmittedRun || options.conversation) return false;
     if (run.invocationSource === "on_demand" && run.triggerDetail === "manual") return false;
+    // dd: a run the board resumed past the hold also passes: a scheduled retry
+    // promoted with "Retry now", or a run started with the run hold's "Resume now".
+    if (isOperatorResumedRun(run)) return false;
     if (parseObject(parseObject(agent.runtimeConfig).aiConnection).mode === "router") return false;
     const now = new Date();
     const cooldown = await agentProviderLimitCooldown(db, {

@@ -150,9 +150,13 @@ interface Agent {
   name: string;
 }
 
+/** Name and avatar of an operator (a user) a task is assigned to. */
+export type UserAssigneeLookup = (userId: string) => { name: string; avatarUrl: string | null };
+
 interface KanbanBoardProps {
   issues: Issue[];
   agents?: Agent[];
+  userAssignee?: UserAssigneeLookup;
   liveIssueIds?: Set<string>;
   compactCards?: boolean;
   collapsedStatuses?: string[];
@@ -169,6 +173,7 @@ function KanbanColumn({
   status,
   issues,
   agents,
+  userAssignee,
   liveIssueIds,
   subtreeLiveCounts,
   compactCards = false,
@@ -180,6 +185,7 @@ function KanbanColumn({
   status: IssueDisplayStatus;
   issues: Issue[];
   agents?: Agent[];
+  userAssignee?: UserAssigneeLookup;
   liveIssueIds?: Set<string>;
   subtreeLiveCounts?: ReadonlyMap<string, number>;
   compactCards?: boolean;
@@ -246,6 +252,7 @@ function KanbanColumn({
               key={issue.id}
               issue={issue}
               agents={agents}
+              userAssignee={userAssignee}
               isLive={liveIssueIds?.has(issue.id)}
               subtreeLiveCount={subtreeLiveCounts?.get(issue.id) ?? 0}
               compact={compactCards}
@@ -277,6 +284,7 @@ function KanbanColumn({
 function KanbanCard({
   issue,
   agents,
+  userAssignee,
   isLive,
   subtreeLiveCount = 0,
   isOverlay,
@@ -285,6 +293,7 @@ function KanbanCard({
 }: {
   issue: Issue;
   agents?: Agent[];
+  userAssignee?: UserAssigneeLookup;
   isLive?: boolean;
   subtreeLiveCount?: number;
   isOverlay?: boolean;
@@ -381,6 +390,10 @@ function KanbanCard({
               </span>
             );
           })()}
+          {!issue.assigneeAgentId && issue.assigneeUserId && userAssignee && (() => {
+            const user = userAssignee(issue.assigneeUserId);
+            return <Identity name={user.name} avatarUrl={user.avatarUrl} size="xs" />;
+          })()}
         </div>
       </Link>
     </Card>
@@ -392,6 +405,7 @@ function KanbanCard({
 export function KanbanBoard({
   issues,
   agents,
+  userAssignee,
   liveIssueIds,
   compactCards = false,
   collapsedStatuses = [],
@@ -469,6 +483,7 @@ export function KanbanBoard({
       status={status}
       issues={columnIssues[status] ?? []}
       agents={agents}
+      userAssignee={userAssignee}
       liveIssueIds={liveIssueIds}
       subtreeLiveCounts={subtreeLiveCounts}
       compactCards={compactCards}
@@ -497,7 +512,7 @@ export function KanbanBoard({
         : <div className="flex gap-3 overflow-x-auto pb-4 -mx-2 px-2">{columns}</div>}
       <DragOverlay>
         {activeIssue ? (
-          <KanbanCard issue={activeIssue} agents={agents} isOverlay compact={compactCards} />
+          <KanbanCard issue={activeIssue} agents={agents} userAssignee={userAssignee} isOverlay compact={compactCards} />
         ) : null}
       </DragOverlay>
     </DndContext>

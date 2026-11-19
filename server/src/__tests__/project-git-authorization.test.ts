@@ -119,6 +119,20 @@ const support = external ? { supported: true } : await getEmbeddedPostgresTestSu
       await f.service.set(f.input.companyId, f.project.id, "A", null);
       await expect(f.service.resolve(f.request, f.scope)).rejects.toThrow("Authorize this project");
     });
+    it.each([
+      { kind: "a personal access token with repositories", github: { credentialKind: "personal_access_token" as const, installationCount: 0, repositoryCount: 3 }, eligible: true },
+      { kind: "a personal access token without repositories", github: { credentialKind: "personal_access_token" as const, installationCount: 0, repositoryCount: 0 }, eligible: false },
+      { kind: "a GitHub App grant without installations", github: { credentialKind: undefined, installationCount: 0, repositoryCount: 3 }, eligible: false },
+    ])("offers $kind as the project's GitHub authorization: $eligible", async ({ github, eligible }) => {
+      const f = await projectAuthorizationFixture();
+      const [saved] = await db.select().from(connectionGrants).where(eq(connectionGrants.id, f.selected.id));
+      await db.update(connectionGrants).set({ providerTenant: { ...saved.providerTenant, github: { ...saved.providerTenant!.github!, ...github } } })
+        .where(eq(connectionGrants.id, f.selected.id));
+      const { options } = await f.service.read(f.input.companyId, f.project.id, "A");
+      expect(options.map(option => option.grantId)).toEqual(eligible ? [f.selected.id] : []);
+      if (eligible) expect(await f.service.set(f.input.companyId, f.project.id, "A", f.selected.id)).toMatchObject({ grantId: f.selected.id });
+      else await expect(f.service.set(f.input.companyId, f.project.id, "A", f.selected.id)).rejects.toThrow();
+    });
     it("rechecks the consenting user's project access before background credential export", async () => {
       const f = await projectAuthorizationFixture();
       await f.service.set(f.input.companyId, f.project.id, "A", f.selected.id);

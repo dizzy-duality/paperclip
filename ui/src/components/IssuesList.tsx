@@ -26,7 +26,7 @@ import {
   shouldBlurPageSearchOnEnter,
   shouldBlurPageSearchOnEscape,
 } from "../lib/keyboardShortcuts";
-import { formatAssigneeUserLabel } from "../lib/assignees";
+import { formatAssigneeUserLabel, userAssigneeLookup } from "../lib/assignees";
 import { buildCompanyUserLabelMap, buildCompanyUserProfileMap } from "../lib/company-members";
 import { createIssueDetailPath, rememberIssueDetailLocationState, withIssueDetailHeaderSeed } from "../lib/issueDetailBreadcrumb";
 import { prefetchIssueDetailForNavigation } from "../lib/issueDetailCache";
@@ -107,6 +107,8 @@ import { taskDateGroup, taskDateGroupSeparator, type TaskDateGroup } from "../li
 import { deriveOriginatingActor, ISSUE_STATUSES, ISSUE_DISPLAY_STATUSES, type Issue, type IssueDisplayStatus, type IssueStatus, type Project } from "@paperclipai/shared";
 import { Badge } from "@/components/ui/badge";
 import { taskStatusIconProps } from "@/lib/task-status-presentation";
+import { IssueSelectBox, IssuesBulkBar } from "./IssuesBulkBar";
+import { useIssueSelection } from "../hooks/useIssueSelection";
 const ISSUE_SEARCH_DEBOUNCE_MS = 250;
 const ISSUE_SEARCH_RESULT_LIMIT = 200;
 const ISSUE_BOARD_COLUMN_RESULT_LIMIT = 200;
@@ -1000,6 +1002,11 @@ function StreamlinedIssuesList({
     [companyMembers?.users],
   );
 
+  const userAssignee = useMemo(
+    () => userAssigneeLookup(currentUserId, companyUserLabelMap, companyUserProfileMap),
+    [companyUserLabelMap, companyUserProfileMap, currentUserId],
+  );
+
   const projectById = useMemo(() => {
     const map = new Map<string, { name: string; color: string | null }>();
     for (const project of projects ?? []) {
@@ -1260,6 +1267,13 @@ function StreamlinedIssuesList({
     companyUserLabelMap,
     projectById,
   ]);
+
+  // Bulk actions apply to selected tasks the current view still shows.
+  const selection = useIssueSelection(filtered);
+  const renderSelectBox = (issue: Issue) => (
+    <IssueSelectBox issue={issue} checked={selection.selectedIds.has(issue.id)}
+      selectionActive={selection.active} onCheckedChange={selection.setSelected} />
+  );
 
   const progressSummary = useMemo(
     () => shouldRenderSubIssueProgressSummary(showProgressSummary, issues.length)
@@ -2115,10 +2129,15 @@ function StreamlinedIssuesList({
         />
       )}
 
+      {viewState.viewMode === "list" && selection.active && selectedCompanyId ? (
+        <IssuesBulkBar companyId={selectedCompanyId} agents={agents} {...selection.bulkBarProps} />
+      ) : null}
+
       {!collectionLoading && !error && !externalObjectFilterError && (viewState.viewMode === "board" ? (
         <KanbanBoard
           issues={filtered}
           agents={agents}
+          userAssignee={userAssignee}
           liveIssueIds={liveIssueIds}
           compactCards={boardCompactCards}
           collapsedStatuses={boardCollapsedStatuses}
@@ -2338,8 +2357,9 @@ function StreamlinedIssuesList({
                           </>
                         )}
                         className={cn(isMutedIssue && "opacity-70", selectedNavKey === `issue:${issue.id}` && "bg-accent/50 hover:bg-accent/50")}
-                        leadingControl={rowPresentation === "task" ? (
-                          hasChildren ? (
+                        leadingControl={rowPresentation === "task" ? (<>
+                          {renderSelectBox(issue)}
+                          {hasChildren ? (
                             <button
                               type="button"
                               data-slot="icon-button"
@@ -2351,8 +2371,8 @@ function StreamlinedIssuesList({
                             </button>
                           ) : (
                             <span data-slot="task-row-disclosure-spacer" className="h-4 w-4 shrink-0" aria-hidden="true" />
-                          )
-                        ) : undefined}
+                          )}
+                        </>) : undefined}
                         statusSlot={rowPresentation === "task" ? (
                           <span className="relative inline-flex items-start self-stretch sm:items-center" onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}>
                             <StatusIcon {...taskStatusIconProps(issue)} size="md" onChange={(s) => onUpdateIssue(issue.id, { status: s })} />
@@ -2372,8 +2392,9 @@ function StreamlinedIssuesList({
                           />
                         ) : undefined}
                         showIdentifier={visibleIssueColumnSet.has("id") && availableIssueColumnSet.has("id")}
-                        mobileLeading={
-                          hasChildren ? (
+                        mobileLeading={(<>
+                          {renderSelectBox(issue)}
+                          {hasChildren ? (
                             <button type="button" data-slot="icon-button" onClick={toggleCollapse}>
                               <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", isExpanded && "rotate-90")} />
                             </button>
@@ -2381,10 +2402,11 @@ function StreamlinedIssuesList({
                             <span className="inline-flex items-center" onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}>
                               <StatusIcon {...taskStatusIconProps(issue)} size="md" onChange={(s) => onUpdateIssue(issue.id, { status: s })} />
                             </span>
-                          )
-                        }
+                          )}
+                        </>)}
                         desktopMetaLeading={rowPresentation === "legacy" ? (
                           <>
+                            <span className="hidden sm:inline-flex">{renderSelectBox(issue)}</span>
                             {hasChildren ? (
                               <button
                                 type="button"

@@ -31,6 +31,7 @@ import { timeAgo } from '@/lib/timeAgo';
 import { skillRoute } from '@/lib/company-skill-routes';
 import { consumeSkillSourceReturn, rememberSkillSourceReturn } from '@/lib/skill-source-connect-return';
 import { groupProjectSkillRepositories } from '@/lib/project-skill-repositories';
+import { AssignSourceSkillsDialog } from './skills/AssignSourceSkillsDialog';
 
 const sourceKey = (companyId: string) => queryKeys.skillSources.all(companyId);
 export function SkillSources() {
@@ -44,6 +45,7 @@ export function SkillSources() {
   const [repairSourceId, setRepairSourceId] = useState<string | null>(null);
   const [branchSourceId, setBranchSourceId] = useState<string | null>(null);
   const [disconnectSource, setDisconnectSource] = useState<SkillSource | null>(null);
+  const [assigning, setAssigning] = useState<SkillSource | null>(null);
   const companyId = selectedCompanyId ?? '';
   useEffect(() => { setBreadcrumbs([{ label: 'Skills', href: '/skills' }, { label: 'Sources' }]); }, [setBreadcrumbs]);
   const query = useQuery({ queryKey: sourceKey(companyId), queryFn: () => skillSourcesApi.list(companyId), enabled: Boolean(companyId), refetchInterval: 5000 });
@@ -150,6 +152,7 @@ export function SkillSources() {
                 </DropdownMenuItem>}
                 <DropdownMenuItem onSelect={() => setRepairSourceId(source.id)}>Choose connection</DropdownMenuItem>
                 {source.accessScope !== 'projects' && !source.projects?.some(project => project.active) && <DropdownMenuItem onSelect={() => setBranchSourceId(source.id)}>Choose a new branch</DropdownMenuItem>}
+                <DropdownMenuItem disabled={installed.length === 0} onSelect={() => setAssigning(source)}>Assign to agents…</DropdownMenuItem>
                 <DropdownMenuItem variant="destructive" disabled={disconnect.isPending} onSelect={() => { disconnect.reset(); reloadRemoval.reset(); setDisconnectSource(source); }}>{source.enabled ? 'Disconnect source' : 'Remove source'}</DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -193,6 +196,7 @@ export function SkillSources() {
     {sourceId && (sourceId === 'new' || activeSource) && <SourceDialog key={`${companyId}:${sourceId}`} companyId={companyId} source={activeSource} onClose={() => navigate('/skills/sources')} onSaved={async result => {
       setResults(prev => ({ ...prev, [result.source.id]: null })); await invalidate(); navigate('/skills/sources');
     }} />}
+    {assigning && <AssignSourceSkillsDialog companyId={companyId} source={assigning} onClose={() => setAssigning(null)} />}
     {sourceId && sourceId !== 'new' && query.isSuccess && !activeSource && <p role="alert" className="text-sm text-destructive">Source not found.</p>}
   </div>;
 }

@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import type { GitHubIdentityDiagnostic } from "@paperclipai/shared";
 import { and, eq } from "drizzle-orm";
 import { isUuidLike } from "@paperclipai/shared";
 import {
@@ -21,9 +22,11 @@ import { isLowTrustQuarantined } from "./source-trust.js";
 
 export type GitHubCredentialSummary = {
   status: "available" | "absent" | "unavailable";
-  source?: "personal" | "dedicated";
+  source?: "personal" | "dedicated" | "delegated";
   login?: string;
   reason?: string;
+  /** States and counts only; see GitHubIdentityDiagnostic. */
+  diagnostic?: GitHubIdentityDiagnostic;
   connectionId?: string;
   grantId?: string;
   authenticationMode?: "managed" | "host" | "anonymous";
@@ -147,6 +150,22 @@ export async function resolveGitHubOperationCredentials(
       env,
     };
   }
+  // An unattended continuation (company_default) does not act for a person, so
+  // the context's responsible user is deliberately not used for credentials.
+  // Say so in the response instead of dropping it silently.
+  const responsibleUserDropped = context?.cause === "company_default";
+  const describe = (diagnostic: GitHubIdentityDiagnostic | undefined): GitHubIdentityDiagnostic | undefined =>
+    diagnostic && {
+      ...diagnostic,
+      identityCause: context?.cause,
+      ...(responsibleUserDropped
+        ? {
+            responsibleUserDropped: "company_default" as const,
+            note:
+              "Unattended continuation (identity cause company_default): the run acts for no person, so only a dedicated grant for this agent or a grant delegated to it can be used.",
+          }
+        : {}),
+    };
   try {
     const resolved = await resolveManagedGitHubCredential(
       db,
@@ -155,7 +174,7 @@ export async function resolveGitHubOperationCredentials(
       {
         agentId: input.agentId,
         heartbeatRunId: input.runId,
-        allowStandingDelegation: false,
+        allowStandingDelegation: true,
         responsibleUserId:
           context?.cause === "company_default"
             ? null
@@ -174,6 +193,7 @@ export async function resolveGitHubOperationCredentials(
         connectionId: resolved.credential.connectionId,
         grantId: resolved.credential.grantId,
         authenticationMode: "managed",
+        ...(resolved.diagnostic ? { diagnostic: describe(resolved.diagnostic) } : {}),
       };
       env = buildGitAuthInvocation(resolved.credential).env;
     } else {
@@ -181,6 +201,7 @@ export async function resolveGitHubOperationCredentials(
         status: resolved.configured ? "unavailable" : "absent",
         source: resolved.identitySource ?? "personal",
         reason: resolved.error ?? "No GitHub identity connected",
+        ...(resolved.diagnostic ? { diagnostic: describe(resolved.diagnostic) } : {}),
       };
     }
   } catch {

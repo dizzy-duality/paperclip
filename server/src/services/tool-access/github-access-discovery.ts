@@ -1,6 +1,6 @@
 import { providerRetryAt } from "../provider-retry-after.js";
 import { randomUUID } from "node:crypto";
-import { unprocessable } from "../../errors.js";
+import { HttpError, unprocessable } from "../../errors.js";
 import { readGitHubRepositoryCatalogFailure } from "./github-repository-catalog-failure.js";
 
 function gitHubRepositoryOwnerType(repository: Record<string, unknown>) {
@@ -293,6 +293,108 @@ export async function loadGitHubGrantMetadata(
     accessRevision: randomUUID(),
     lastAccessRefreshAt: accessRefreshStartedAt,
     webhookHealth: "pending",
+  };
+}
+
+/**
+ * Account and repository access of a GitHub personal access token, classic or
+ * fine-grained. A PAT cannot list installations: GitHub answers
+ * /user/installations with 403 for both kinds ("You must authenticate with an
+ * access token authorized to a GitHub App" for classic, "Resource not
+ * accessible by personal access token" for fine-grained; observed 2026-10-06).
+ * /user/repos returns exactly the repositories the token reaches: all of a
+ * classic token's, the selected ones of a fine-grained token.
+ */
+export async function loadGitHubPatGrantMetadata(
+  accessToken: string,
+  request: typeof fetch = fetch,
+): Promise<{
+  userId: string;
+  login: string;
+  avatarUrl?: string;
+  credentialKind: "personal_access_token";
+  installationCount: number;
+  repositoryCount: number;
+  repositorySelection: "selected";
+  installationIds: string[];
+  installationOwnerLogins: string[];
+  repositories: Array<{ id: string; fullName: string; installationId: string; private?: boolean }>;
+  managementUrl: string;
+  accessRevision: string;
+  lastAccessRefreshAt: string;
+}> {
+  const accessRefreshStartedAt = new Date().toISOString();
+  const github = async (path: string): Promise<{ data: unknown; hasNext: boolean }> => {
+    let response: Response;
+    try {
+      response = await request(`https://api.github.com${path}`, {
+        headers: {
+          accept: "application/vnd.github+json",
+          authorization: `Bearer ${accessToken}`,
+          "user-agent": "Paperclip",
+          "x-github-api-version": "2022-11-28",
+        },
+        signal: AbortSignal.timeout(15_000),
+      });
+    } catch {
+      throw new HttpError(502, "GitHub could not be reached to check this access token", {
+        code: "github_unreachable",
+      });
+    }
+    if (!response.ok)
+      throw unprocessable("GitHub could not verify this access token", {
+        code: response.status === 401 ? "github_token_invalid" : "github_access_check_failed",
+      });
+    return {
+      data: (await response.json()) as unknown,
+      hasNext: /;\s*rel="next"/.test(response.headers.get("link") ?? ""),
+    };
+  };
+  const { data: user } = await github("/user");
+  const userId = recordValue(user) ? githubId(user.id) : null;
+  const login = recordValue(user) && typeof user.login === "string" ? user.login : null;
+  if (!recordValue(user) || !userId || !login)
+    throw unprocessable("GitHub returned invalid account metadata", { code: "github_bad_response" });
+  const repositories = new Map<string, { id: string; fullName: string; installationId: string; private?: boolean }>();
+  for (let page = 1; page <= 50; page += 1) {
+    const { data, hasNext } = await github(
+      `/user/repos?per_page=100&page=${page}&affiliation=owner,collaborator,organization_member`,
+    );
+    if (!Array.isArray(data))
+      throw unprocessable("GitHub returned invalid repository metadata", { code: "github_bad_response" });
+    for (const repository of data) {
+      const id = recordValue(repository) ? githubId(repository.id) : null;
+      const fullName = recordValue(repository) && typeof repository.full_name === "string" ? repository.full_name : "";
+      if (!id || !/^[A-Za-z0-9][A-Za-z0-9-]*\/(?!\.{1,2}$)[A-Za-z0-9_.-]+$/.test(fullName))
+        throw unprocessable("GitHub returned invalid repository metadata", { code: "github_bad_response" });
+      repositories.set(id, {
+        id,
+        fullName,
+        installationId: "",
+        ...(recordValue(repository) && typeof repository.private === "boolean" ? { private: repository.private } : {}),
+      });
+    }
+    if (!hasNext) break;
+  }
+  if (repositories.size === 0)
+    throw unprocessable("This access token cannot reach any repository. Give it repository access (fine-grained: select repositories with Contents access) and try again.", {
+      code: "github_repository_access_required",
+      managementUrl: "https://github.com/settings/personal-access-tokens",
+    });
+  return {
+    userId,
+    login,
+    ...(typeof user.avatar_url === "string" ? { avatarUrl: user.avatar_url } : {}),
+    credentialKind: "personal_access_token",
+    installationCount: 0,
+    repositoryCount: repositories.size,
+    repositorySelection: "selected",
+    installationIds: [],
+    installationOwnerLogins: [],
+    repositories: [...repositories.values()].sort((a, b) => a.fullName.localeCompare(b.fullName)),
+    managementUrl: "https://github.com/settings/personal-access-tokens",
+    accessRevision: randomUUID(),
+    lastAccessRefreshAt: accessRefreshStartedAt,
   };
 }
 

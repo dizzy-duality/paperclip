@@ -8,7 +8,7 @@ import { notifyExecutionRunWork } from "../execution-control-notifications.js";
 import { PersistedExecutionWaitRefusal, writeDeferredExecutionWait } from "../deferred-execution-wait.js";
 import { notifyDeferredExecutionWork } from "../deferred-execution-notifications.js";
 import type { DeferredReceiptRecoveryOptions } from "../deferred-execution-notifications.js";
-import { notifyRunDispatch } from "../run-dispatch-notifications.js";
+import { notifyQueuedRunDispatch, notifyRunDispatch } from "../run-dispatch-notifications.js";
 import { notifyStatusCardIssueChange } from "../status-card-notifications.js";
 import { notifyRoutineExecutionStatus } from "../routine-execution-status-notifications.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "../delivery-work-notifications.js";
@@ -25,7 +25,7 @@ import { assertTaskRetryConversationAllowed, readTaskRetryIntent, readTaskRetryB
 import { insertIssueComment } from "../issue-comment-writes.js";
 import { withExternalAdmissionGuard, assertNoExternalOverlap } from "../../modules/external-agents/index.js";
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
-import { normalizeAgentNameKey } from "./retries.js";
+import { isOperatorRequestedRun, normalizeAgentNameKey, providerQuotaHoldUntil } from "./retries.js";
 import { publishActiveDotComment } from "../dot-assignment-follow-up.js";
 import { publishActiveMuseComment } from "../muse-assignment-follow-up.js";
 import {
@@ -89,6 +89,7 @@ import {
   gt,
   gte,
   inArray,
+  isNotNull,
   isNull,
   lte,
   ne,
@@ -182,7 +183,7 @@ import {
   type AgentOrgRow,
 } from "../agent-invokability.js";
 import { supportsUnscopedTimerHeartbeat } from "../heartbeat-policy.js";
-import { isUuidLike } from "@paperclipai/shared";
+import { isUuidLike, isWithinActiveHours, nextActiveHoursOpening } from "@paperclipai/shared";
 import { retryChatControlAdmission } from "../chat-control-admission-retry.js";
 
 import type { HeartbeatServiceOptions } from "../heartbeat.js";
@@ -2094,6 +2095,156 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     }
   }
 
+  // Why an agent's automatic runs stay queued, or null when nothing holds them.
+  // At its provider's usage limit an agent would only fail again, starting a
+  // sandbox each time: hold until the limit resets. Outside its active hours,
+  // hold until the window opens. Later wakes coalesce into the held runs and
+  // the periodic resumeQueuedRuns pass starts them. An operator-requested run
+  // (a manual run, "Retry now", "Resume now") still starts, so an operator can
+  // check whether the limit has lifted.
+  async function readAgentRunHold(
+    agent: typeof agents.$inferSelect,
+    policy: ReturnType<typeof parseHeartbeatPolicy>,
+  ): Promise<{ reason: "provider_quota" | "off_hours"; until: Date | null } | null> {
+    const [latestFinishedRun] = await db
+      .select({
+        errorCode: heartbeatRuns.errorCode,
+        finishedAt: heartbeatRuns.finishedAt,
+        resultJson: sql<Record<string, unknown> | null>`jsonb_build_object(
+          'errorFamily', ${heartbeatRuns.resultJson}->'errorFamily',
+          'retryNotBefore', ${heartbeatRuns.resultJson}->'retryNotBefore',
+          'transientRetryNotBefore', ${heartbeatRuns.resultJson}->'transientRetryNotBefore')`,
+      })
+      .from(heartbeatRuns)
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, agent.companyId),
+          eq(heartbeatRuns.agentId, agent.id),
+          inArray(heartbeatRuns.status, ["succeeded", "failed", "timed_out"]),
+          isNotNull(heartbeatRuns.finishedAt),
+        ),
+      )
+      .orderBy(desc(heartbeatRuns.finishedAt))
+      .limit(1);
+    const quotaHoldUntil = providerQuotaHoldUntil(latestFinishedRun ?? null);
+    if (quotaHoldUntil !== null && quotaHoldUntil.getTime() > Date.now()) {
+      return { reason: "provider_quota", until: quotaHoldUntil };
+    }
+    const { activeHours } = policy;
+    if (activeHours !== null && !isWithinActiveHours(activeHours, new Date())) {
+      return { reason: "off_hours", until: null };
+    }
+    return null;
+  }
+
+  async function listHeldQueuedRuns(agentId: string) {
+    const queued = await db
+      .select({
+        id: heartbeatRuns.id,
+        invocationSource: heartbeatRuns.invocationSource,
+        contextSnapshot: heartbeatRuns.contextSnapshot,
+        scheduledRetryAt: heartbeatRuns.scheduledRetryAt,
+      })
+      .from(heartbeatRuns)
+      .where(and(eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, "queued")))
+      .orderBy(asc(heartbeatRuns.createdAt));
+    return queued.filter((run) => !isOperatorRequestedRun(run));
+  }
+
+  async function getAgentRunHold(agentId: string) {
+    const agent = await getAgent(agentId);
+    if (!agent) throw notFound("Agent not found");
+    const hold = await readAgentRunHold(agent, parseHeartbeatPolicy(agent));
+    if (!hold) return null;
+    return {
+      reason: hold.reason,
+      until: hold.until?.toISOString() ?? null,
+      heldRuns: (await listHeldQueuedRuns(agentId)).length,
+    };
+  }
+
+  // The queued-run lane is deadline-driven: without this, a held run would
+  // wait for an unrelated notification after its hold ended. The earliest
+  // moment a held run's hold ends: the provider's reset time, or the next
+  // opening of the agent's active hours.
+  async function nextHeldQueuedRunAt(): Promise<number | null> {
+    const cutoff = await getWorktreeExecutionCutoff();
+    const rows = await db
+      .selectDistinct({ agentId: heartbeatRuns.agentId })
+      .from(heartbeatRuns)
+      .innerJoin(companies, eq(companies.id, heartbeatRuns.companyId))
+      .where(and(
+        eq(heartbeatRuns.status, "queued"),
+        eq(companies.status, "active"),
+        cutoff ? gte(heartbeatRuns.createdAt, cutoff) : undefined,
+      ));
+    let next: number | null = null;
+    const now = new Date();
+    for (const { agentId } of rows) {
+      const heldRuns = await listHeldQueuedRuns(agentId);
+      if (heldRuns.length === 0) continue;
+      const agent = await getAgent(agentId);
+      if (!agent) continue;
+      const policy = parseHeartbeatPolicy(agent);
+      const hold = await readAgentRunHold(agent, policy);
+      if (!hold) {
+        // The hold ended but runs it held are still queued (the pass at its
+        // end was scoped elsewhere, or it ended mid-pass): they are due now.
+        // Each such run earns one pass, so one that stays queued for another
+        // reason does not keep the lane looping.
+        const stranded = heldRuns.filter((run) => reportedHeldRunIds.delete(run.id));
+        if (stranded.length > 0) next = now.getTime();
+        continue;
+      }
+      const endsAt = hold.reason === "provider_quota"
+        ? hold.until?.getTime() ?? null
+        : policy.activeHours ? nextActiveHoursOpening(policy.activeHours, now)?.getTime() ?? null : null;
+      if (endsAt !== null) next = next === null ? endsAt : Math.min(next, endsAt);
+    }
+    return next;
+  }
+
+  // Runs this process has already reported as held. A newly held run wakes
+  // the queued-run lane once so it re-reads nextHeldQueuedRunAt (the hold may
+  // have been placed outside the lane); repeated holds of the same run do not,
+  // which would otherwise re-run the lane on every pass.
+  const reportedHeldRunIds = new Set<string>();
+  async function reportHeldRuns(companyId: string, runIds: string[]) {
+    const fresh = runIds.filter((id) => !reportedHeldRunIds.has(id));
+    if (fresh.length === 0) return;
+    if (reportedHeldRunIds.size > 10_000) reportedHeldRunIds.clear();
+    for (const id of fresh) reportedHeldRunIds.add(id);
+    await db.transaction((tx) => notifyQueuedRunDispatch(tx, { companyId }))
+      .catch((err: unknown) => logger.warn({ err, companyId }, "failed to wake queued-run dispatch for a held run"));
+  }
+
+  // "Resume now": start the oldest held run as if an operator asked for it.
+  // If the hold was wrong, that run finishes and lifts it for the rest; if
+  // the limit is real, it fails on it and the hold stays.
+  async function resumeHeldRun(agentId: string) {
+    const [run] = await listHeldQueuedRuns(agentId);
+    if (!run) return { outcome: "no_held_run" as const, runId: null };
+    const now = new Date();
+    await db
+      .update(heartbeatRuns)
+      .set({
+        contextSnapshot: {
+          ...parseObject(run.contextSnapshot),
+          holdResumedRunId: run.id,
+          holdResumedAt: now.toISOString(),
+        },
+        updatedAt: now,
+      })
+      .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "queued")));
+    const started = await startNextQueuedRunForAgent(agentId);
+    return {
+      outcome: started.some((claimed) => claimed.id === run.id)
+        ? ("started" as const)
+        : ("requested" as const),
+      runId: run.id,
+    };
+  }
+
   async function startNextQueuedRunForAgent(agentId: string) {
     if (isRunAdmissionClosed() || (await getSchedulingSuppression()).suppressed) return [];
     const cutoff = await getWorktreeExecutionCutoff();
@@ -2135,6 +2286,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         .orderBy(asc(heartbeatRuns.createdAt));
       if (queuedRuns.length === 0) return [];
       if (queuedRuns.every(run => !run.startedAt) && !await canStartNewExternalBotWork(agent)) return [];
+
+      const hold = await readAgentRunHold(agent, policy);
 
       const dependencyReadiness = await listQueuedRunDependencyReadiness(
         agent.companyId,
@@ -2210,8 +2363,15 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       });
 
       const claimedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
+      let heldRuns = 0;
+      const heldRunIds: string[] = [];
       for (const queuedRun of prioritizedRuns) {
         if (claimedRuns.length >= availableSlots) break;
+        if (hold && !isOperatorRequestedRun(queuedRun)) {
+          heldRuns += 1;
+          heldRunIds.push(queuedRun.id);
+          continue;
+        }
         let claimed: typeof heartbeatRuns.$inferSelect | null;
         try {
           claimed = await claimQueuedRun(queuedRun, companyAgents, deferredPostCommitEffects, deferredCancellations);
@@ -2228,6 +2388,19 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           continue;
         }
         if (claimed) claimedRuns.push(claimed);
+      }
+      if (heldRunIds.length > 0) await reportHeldRuns(agent.companyId, heldRunIds);
+      if (heldRuns > 0 && hold?.reason === "provider_quota") {
+        logger.info(
+          { agentId, heldRuns, until: hold.until?.toISOString() },
+          "agent is at its provider usage limit; leaving automatic runs queued until it resets",
+        );
+      }
+      if (heldRuns > 0 && hold?.reason === "off_hours") {
+        logger.info(
+          { agentId, heldRuns, activeHours: policy.activeHours },
+          "agent is outside its active hours; leaving automatic runs queued until they start",
+        );
       }
       if (claimedRuns.length === 0) return [];
 
@@ -5288,5 +5461,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     parseHeartbeatPolicy,
     nextTimerHeartbeatAt,
     claimDueTimerHeartbeat,
+    getAgentRunHold,
+    resumeHeldRun,
+    nextHeldQueuedRunAt,
   };
 }

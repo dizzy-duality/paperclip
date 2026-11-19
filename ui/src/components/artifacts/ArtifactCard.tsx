@@ -1,7 +1,8 @@
 import { type SyntheticEvent, useEffect, useRef, useState } from "react";
-import { Download, ExternalLink, Paperclip, Play } from "lucide-react";
+import { Download, ExternalLink, FileDown, Paperclip, Play } from "lucide-react";
 import type { CompanyArtifact } from "@/api/artifacts";
 import { Link } from "@/lib/router";
+import { downloadMarkdownAsPdf } from "@/lib/markdown-pdf";
 import { cn, formatDate } from "@/lib/utils";
 
 interface ArtifactCardProps {
@@ -192,6 +193,43 @@ function SecondaryAction({
   );
 }
 
+// The card is a link; the PDF action must not navigate. It fetches the
+// document's Markdown through the same download link, then renders the PDF.
+function PdfAction({ downloadPath, title }: { downloadPath: string; title: string }) {
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const label = failed ? "PDF download failed, try again" : "Download as PDF";
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      disabled={busy}
+      onClick={async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setBusy(true);
+        setFailed(false);
+        try {
+          const response = await fetch(downloadPath, { credentials: "same-origin" });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          await downloadMarkdownAsPdf(title, await response.text(), title);
+        } catch {
+          setFailed(true);
+        } finally {
+          setBusy(false);
+        }
+      }}
+      className={cn(
+        "flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50",
+        failed ? "text-destructive" : "text-muted-foreground",
+      )}
+    >
+      <FileDown className="h-3.5 w-3.5" />
+    </button>
+  );
+}
+
 export function ArtifactCard({ artifact }: ArtifactCardProps) {
   return (
     <Link
@@ -212,16 +250,23 @@ export function ArtifactCard({ artifact }: ArtifactCardProps) {
           >
             {artifact.title}
           </h3>
-          <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+          <div className="flex shrink-0 items-center gap-0.5">
             {artifact.openPath ? (
               <SecondaryAction href={artifact.openPath} title="Open file in new tab">
                 <ExternalLink className="h-3.5 w-3.5" />
               </SecondaryAction>
             ) : null}
             {artifact.downloadPath ? (
-              <SecondaryAction href={artifact.downloadPath} download title="Download file">
+              <SecondaryAction
+                href={artifact.downloadPath}
+                download
+                title={artifact.source === "document" ? "Download Markdown" : "Download file"}
+              >
                 <Download className="h-3.5 w-3.5" />
               </SecondaryAction>
+            ) : null}
+            {artifact.source === "document" && artifact.downloadPath ? (
+              <PdfAction downloadPath={artifact.downloadPath} title={artifact.title} />
             ) : null}
           </div>
         </div>

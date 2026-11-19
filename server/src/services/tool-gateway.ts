@@ -42,7 +42,7 @@ import { runIdentityContexts } from "@paperclipai/db";
 import { executeSpekoVoiceTool, spekoToolsForSession } from "./voice/speko-agent-tools.js";
 import { captureRunIdentity } from "./run-identity.js";
 import { emitConnectionInvoked } from "./connector-telemetry.js";
-import { resolveManagedGitHubIdentitySelection } from "./git-credentials.js";
+import { githubGrantIdentitySource, resolveManagedGitHubIdentitySelection } from "./git-credentials.js";
 import { extractRemoteMcpPending } from "./remote-mcp-pending.js";
 import { logger } from "../middleware/logger.js";
 import { getAppDefinitionForApplicationKey, isConnectorFeatureEnabled } from "@paperclipai/shared";
@@ -210,7 +210,14 @@ import { extendApprovedExecutionWaitDeadline } from "./approved-execution-wait.j
 
 const DEFAULT_SESSION_TTL_MS = 15 * 60 * 1000;
 const MAX_SESSION_TTL_MS = 60 * 60 * 1000;
-const DEFAULT_TOOL_TIMEOUT_MS = 10_000;
+// The whole budget of a tool call that names no timeout, which is every call
+// agents make over the MCP gateway route. A remote MCP server behind a gateway
+// (Obot: upstream session, token exchanges, then the call) needs more than the
+// old 10 s. Operators can change it with PAPERCLIP_TOOL_TIMEOUT_MS.
+function defaultToolTimeoutMs() {
+  const configured = Number(process.env.PAPERCLIP_TOOL_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured >= 1 ? Math.floor(configured) : 60_000;
+}
 
 export function resolveCredentialGrantKind(
   policy: "shared" | "per_user" | "per_user_with_fallback" | "per_agent",
@@ -790,13 +797,12 @@ function gatewaySessionFromRow(
 }
 
 function timeoutMs(value: number | undefined, tool?: ToolGatewayDescriptor) {
+  const fallback = defaultToolTimeoutMs();
   if (!Number.isFinite(value)) return tool?.providerType === "paperclip_github_chat"
-    ? GITHUB_BOT_TOOL_TIMEOUT_MS
-    : DEFAULT_TOOL_TIMEOUT_MS;
-  return Math.max(
-    1,
-    Math.min(60_000, Math.floor(value ?? DEFAULT_TOOL_TIMEOUT_MS)),
-  );
+    ? Math.max(GITHUB_BOT_TOOL_TIMEOUT_MS, fallback)
+    : fallback;
+  // A caller may ask for up to 60 s, or up to the operator's default if higher.
+  return Math.max(1, Math.min(Math.max(60_000, fallback), Math.floor(value ?? fallback)));
 }
 
 function sessionTtlMs(value: number | undefined) {
@@ -3028,7 +3034,7 @@ export function createToolGatewayService(
           {
             agentId: session.agentId,
             responsibleUserId: session.responsibleUserId,
-            allowStandingDelegation: false,
+            allowStandingDelegation: true,
           },
         );
         if (!selected.grant)
@@ -3087,7 +3093,7 @@ export function createToolGatewayService(
               {
                 agentId: session.agentId,
                 responsibleUserId: session.responsibleUserId,
-                allowStandingDelegation: false,
+                allowStandingDelegation: true,
                 excludeGrantId: original.id,
               },
             );
@@ -4179,6 +4185,20 @@ export function createToolGatewayService(
       session.identityContextId &&
       (connection.config.sourceTemplateKey === "github" ||
         connection.transportConfig?.sourceTemplateKey === "github");
+    // Report a delegated member grant as delegated, not personal.
+    const source = githubGrantIdentitySource(grant, session.responsibleUserId);
+    // Keep the credential broker's diagnostic instead of erasing it.
+    const recordGitHub = async (summary: NonNullable<typeof runIdentityContexts.$inferSelect["github"]>) => {
+      const where = and(
+        eq(runIdentityContexts.id, session.identityContextId!),
+        eq(runIdentityContexts.companyId, session.companyId),
+      );
+      const [current] = await db.select({ github: runIdentityContexts.github }).from(runIdentityContexts).where(where);
+      await db
+        .update(runIdentityContexts)
+        .set({ github: { ...summary, ...(current?.github?.diagnostic ? { diagnostic: current.github.diagnostic } : {}) } })
+        .where(where);
+    };
     try {
       const captured = githubOperationCredentials.get(session);
       const headers =
@@ -4191,42 +4211,22 @@ export function createToolGatewayService(
               resolveOptions,
             );
       if (tracked)
-        await db
-          .update(runIdentityContexts)
-          .set({
-            github: {
-              status: "available",
-              login: grant.providerTenant?.github?.login,
-              source: grant.kind === "agent" ? "dedicated" : "personal",
-              connectionId: connection.id,
-              grantId: grant.id,
-              authenticationMode: "managed",
-            },
-          })
-          .where(
-            and(
-              eq(runIdentityContexts.id, session.identityContextId!),
-              eq(runIdentityContexts.companyId, session.companyId),
-            ),
-          );
+        await recordGitHub({
+          status: "available",
+          login: grant.providerTenant?.github?.login,
+          source,
+          connectionId: connection.id,
+          grantId: grant.id,
+          authenticationMode: "managed",
+        });
       return headers;
     } catch (error) {
       if (tracked)
-        await db
-          .update(runIdentityContexts)
-          .set({
-            github: {
-              status: "unavailable",
-              reason: "GitHub authorization is unavailable",
-              source: grant.kind === "agent" ? "dedicated" : "personal",
-            },
-          })
-          .where(
-            and(
-              eq(runIdentityContexts.id, session.identityContextId!),
-              eq(runIdentityContexts.companyId, session.companyId),
-            ),
-          );
+        await recordGitHub({
+          status: "unavailable",
+          reason: "GitHub authorization is unavailable",
+          source,
+        });
       throw error;
     }
   }
@@ -4697,7 +4697,7 @@ export function createToolGatewayService(
         : await resolveManagedGitHubIdentitySelection(db, session.companyId, {
             agentId: session.agentId,
             responsibleUserId: session.responsibleUserId,
-            allowStandingDelegation: false,
+            allowStandingDelegation: true,
           });
       if (!selected.grant || selected.grant.connectionId !== connection.id) {
         throw new ToolGatewayHttpError(
@@ -5658,7 +5658,7 @@ export function createToolGatewayService(
     );
     if (template.templateId === "paperclip.cognee-cloud") {
       return callLocalStdioMcp({ connection: input.connection, template, env,
-        protocolMethod: input.method, protocolParams: input.params ?? {}, timeoutMs: DEFAULT_TOOL_TIMEOUT_MS });
+        protocolMethod: input.method, protocolParams: input.params ?? {}, timeoutMs: defaultToolTimeoutMs() });
     }
     return runtimeSupervisor.useConnectionSlot(
       {
@@ -5682,7 +5682,7 @@ export function createToolGatewayService(
           env,
           protocolMethod: input.method,
           protocolParams: input.params ?? {},
-          timeoutMs: DEFAULT_TOOL_TIMEOUT_MS,
+          timeoutMs: defaultToolTimeoutMs(),
         }),
     );
   }

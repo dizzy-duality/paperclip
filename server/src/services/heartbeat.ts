@@ -113,6 +113,7 @@ import {
   createHeartbeatRetries,
 } from "./heartbeat/retries.js";
 export {
+  providerQuotaHoldUntil,
   BOUNDED_TRANSIENT_HEARTBEAT_RETRY_DELAYS_MS,
   WORKSPACE_BUSY_RETRY_WAKE_REASON,
   WORKSPACE_BUSY_ERROR_CODE,
@@ -1356,6 +1357,9 @@ export function heartbeatService(
     parseHeartbeatPolicy,
     nextTimerHeartbeatAt,
     claimDueTimerHeartbeat,
+    getAgentRunHold,
+    resumeHeldRun,
+    nextHeldQueuedRunAt,
   } = heartbeatQueue;
 
   // Earlier factories capture these callbacks before queue construction.
@@ -4457,10 +4461,14 @@ export function heartbeatService(
         promoteDueScheduledRetries,
         nextScheduledRetryAt,
         resumeQueuedRunsAfterDrain,
+        nextHeldQueuedRunAt,
         schedulingSuppressed: async () => (await getSchedulingSuppression(true)).suppressed,
       }, () => canRun() && readTaskDrain(new Date()) === null),
     promoteDueScheduledRetries,
     retryScheduledRetryNow,
+    getAgentRunHold,
+    resumeHeldRun,
+    nextHeldQueuedRunAt,
 
     resumeQueuedRuns,
 

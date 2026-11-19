@@ -23,6 +23,9 @@ vi.mock("@/lib/router", () => ({
   ),
 }));
 
+const downloadMarkdownAsPdf = vi.fn(async () => {});
+vi.mock("@/lib/markdown-pdf", () => ({ downloadMarkdownAsPdf: (...args: unknown[]) => downloadMarkdownAsPdf(...(args as [])) }));
+
 import { ArtifactCard } from "./ArtifactCard";
 import type { CompanyArtifact } from "@/api/artifacts";
 
@@ -253,6 +256,36 @@ describe("ArtifactCard", () => {
     );
     expect(markup).not.toContain('aria-label="Download file"');
     expect(markup).not.toContain('aria-label="Open file in new tab"');
+  });
+
+  it("shows document downloads without hover: Markdown link and a PDF built from it", async () => {
+    const fetchMock = vi.fn(async () => new Response("# Plan\n\nBody"));
+    vi.stubGlobal("fetch", fetchMock);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    flushSync(() => root.render(
+      <ArtifactCard
+        artifact={makeArtifact({
+          source: "document", mediaKind: "document", title: "Offerte plan",
+          contentPath: null, openPath: null, downloadPath: "/api/issues/issue-1/documents/plan/download",
+        })}
+      />,
+    ));
+
+    const markdown = container.querySelector('a[aria-label="Download Markdown"]');
+    expect(markdown?.getAttribute("href")).toBe("/api/issues/issue-1/documents/plan/download");
+    expect(markdown?.parentElement?.className).not.toContain("opacity-0");
+
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true });
+    container.querySelector<HTMLButtonElement>('button[aria-label="Download as PDF"]')!.dispatchEvent(click);
+    await vi.waitFor(() => expect(downloadMarkdownAsPdf).toHaveBeenCalledWith("Offerte plan", "# Plan\n\nBody", "Offerte plan"));
+    expect(fetchMock).toHaveBeenCalledWith("/api/issues/issue-1/documents/plan/download", { credentials: "same-origin" });
+    expect(click.defaultPrevented).toBe(true);
+
+    root.unmount();
+    container.remove();
+    vi.unstubAllGlobals();
   });
 
   it("reserves the same title row height when file actions are absent", () => {

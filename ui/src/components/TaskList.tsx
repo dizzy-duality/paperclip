@@ -11,6 +11,7 @@ import { IssueRow, type IssueRowDensity } from "./IssueRow";
 import { IssueGroupHeader } from "./IssueGroupHeader";
 import { TaskListColumnHeader, TaskListColumnSettings, TaskListViewport } from "./TaskListColumns";
 import { TaskRowGroup } from "./TaskRowGroup";
+import { IssueSelectBox } from "./IssuesBulkBar";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { useTaskRowBudget } from "../hooks/useTaskRowBudget";
@@ -27,6 +28,15 @@ export type TaskListItem = {
   assignee?: string | null;
   assigneeAgent?: AvatarAgent | null;
   assigneeUserAvatarUrl?: string | null;
+};
+
+/** Row checkboxes for IssuesBulkBar; see useIssueSelection. */
+export type TaskListSelection = {
+  selectedIds: ReadonlySet<string>;
+  active: boolean;
+  setSelected: (issueId: string, selected: boolean) => void;
+  /** Rows that get a checkbox; all rows when omitted. */
+  selectableIds?: ReadonlySet<string>;
 };
 
 export type TaskListGrouping = "none" | "status" | "project";
@@ -46,7 +56,7 @@ export function includeTaskListAncestors(items: readonly TaskListItem[], matches
 }
 
 /** Opt-in collection built from the reviewed row, hierarchy and column primitives. */
-export function TaskList({ items, allItems = items, initialColumns = defaultTaskListColumns, density = "comfortable", collapsedIds, onCollapsedIdsChange, groupBy = "none", emptyState, issueLinkState, collectionKey, preferenceLocation, sort: controlledSort, onSortChange }: {
+export function TaskList({ items, allItems = items, initialColumns = defaultTaskListColumns, density = "comfortable", collapsedIds, onCollapsedIdsChange, groupBy = "none", emptyState, issueLinkState, collectionKey, preferenceLocation, sort: controlledSort, onSortChange, selection }: {
   items: readonly TaskListItem[];
   allItems?: readonly TaskListItem[];
   initialColumns?: readonly TaskListColumnId[];
@@ -61,6 +71,7 @@ export function TaskList({ items, allItems = items, initialColumns = defaultTask
   preferenceLocation?: TaskCollectionPreferenceLocation;
   sort?: TaskListOrder;
   onSortChange?: (sort: TaskListSort | undefined) => void;
+  selection?: TaskListSelection;
 }) {
   const localKey = useId();
   const { columns, order: columnOrder, setColumns, setOrder: setColumnOrder } = useTaskListColumnPreferences(preferenceLocation, initialColumns);
@@ -102,19 +113,22 @@ export function TaskList({ items, allItems = items, initialColumns = defaultTask
     const branch = issue.currentExecutionWorkspace?.branchName;
     const assigneeName = item.assignee ?? (issue.assigneeAgentId ? "Unknown agent" : issue.assigneeUserId ? "User" : "Unassigned");
     const assigneeUserAvatarUrl = paperclipHumanAvatarUrl(item.assigneeUserAvatarUrl);
+    const selectable = !!selection && (!selection.selectableIds || selection.selectableIds.has(issue.id));
     return (
       <Fragment key={issue.id}>
         <IssueRow
           issue={issue} presentation="task" appearance="refreshed" density={density} issueLinkState={issueLinkState}
           unreadState={item.unread ? "visible" : "hidden"}
           treeGuides={depth} chevronInGuide={depth > 0 && children.length > 0}
-          leadingControl={children.length ? (
-            <Button variant="ghost" size="icon-xs" className="task-row-disclosure" aria-label={`${expanded ? "Collapse" : "Expand"} ${issue.title}`} aria-expanded={expanded} onClick={() => {
+          leadingControl={selectable || children.length ? (<>
+            {selection && selectable ? <IssueSelectBox issue={issue} checked={selection.selectedIds.has(issue.id)}
+              selectionActive={selection.active} onCheckedChange={selection.setSelected} /> : null}
+            {children.length ? <Button variant="ghost" size="icon-xs" className="task-row-disclosure" aria-label={`${expanded ? "Collapse" : "Expand"} ${issue.title}`} aria-expanded={expanded} onClick={() => {
               const next = new Set(collapsed);
               if (next.has(issue.id)) next.delete(issue.id); else next.add(issue.id);
               setCollapsed(next);
-            }}>{expanded ? <ChevronDown aria-hidden /> : <ChevronRight aria-hidden />}</Button>
-          ) : undefined}
+            }}>{expanded ? <ChevronDown aria-hidden /> : <ChevronRight aria-hidden />}</Button> : null}
+          </>) : undefined}
           columnValues={{
             createdBy: item.createdBy,
             assignee: assigneeName,
