@@ -49,3 +49,30 @@ export function isWithinActiveHours(hours: ActiveHours, now: Date) {
   const end = minutesOfDay(hours.end);
   return start <= end ? current >= start && current < end : current >= start || current < end;
 }
+
+/**
+ * The first minute at or after `from` that falls inside the window: `from`
+ * itself when it already does. Null when the window is never open (start ===
+ * end). Window edges are whole minutes, so a minute-granular answer is exact.
+ */
+export function nextActiveHoursOpening(hours: ActiveHours, from: Date): Date | null {
+  if (minutesOfDay(hours.start) === minutesOfDay(hours.end)) return null;
+  if (isWithinActiveHours(hours, from)) return from;
+  const minute = 60_000;
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: hours.timezone, hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(from);
+  const current = Number(parts.find((part) => part.type === "hour")?.value ?? 0) * 60
+    + Number(parts.find((part) => part.type === "minute")?.value ?? 0);
+  const startOfMinute = Math.floor(from.getTime() / minute) * minute;
+  // Jump to the local start time, then walk minute by minute across any DST
+  // shift that moved it (at most a few hours; 48 h bounds the search).
+  const guess = startOfMinute + (((minutesOfDay(hours.start) - current) % 1440 + 1440) % 1440) * minute;
+  for (const base of [guess - 180 * minute, startOfMinute]) {
+    for (let at = Math.max(base, startOfMinute + minute); at <= startOfMinute + 2 * 1440 * minute; at += minute) {
+      if (isWithinActiveHours(hours, new Date(at))) return new Date(at);
+      if (base !== startOfMinute && at > guess + 180 * minute) break;
+    }
+  }
+  return null;
+}

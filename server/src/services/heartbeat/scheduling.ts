@@ -1356,8 +1356,8 @@ export function createHeartbeatScheduling(
     let checked = 0, enqueued = 0, skipped = 0;
     for (const { agent, intervalSec } of await eligibleTimerAgents()) {
       if (!canContinue()) break;
-      // Outside the agent's active hours the timer heartbeat is skipped; the
-      // overdue deadline keeps the lane polling until the window opens.
+      // Outside the agent's active hours the timer heartbeat is skipped; its
+      // projected deadline (timer-policy) is the window's next opening.
       const { activeHours } = parseHeartbeatPolicy(agent);
       if (activeHours && !isWithinActiveHours(activeHours, now)) continue;
       checked++;

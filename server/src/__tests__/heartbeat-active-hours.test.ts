@@ -159,4 +159,22 @@ describeEmbeddedPostgres("agent active hours", () => {
     // 23:00 CEST: inside.
     expect((await heartbeat.tickTimers(new Date("2026-07-15T21:00:00Z"))).enqueued).toBe(1);
   });
+
+  it("projects an off-hours timer to the window's next opening, not a past deadline", async () => {
+    const night = { start: "22:00", end: "06:00", timezone: "Europe/Amsterdam" };
+    const ids = await insertAgent(night, new Date("2026-07-15T00:00:00Z"));
+    const heartbeat = heartbeatService(db);
+
+    // 14:00 CEST, overdue: the deadline is tonight's 22:00 CEST (20:00Z), so
+    // the timer lane and idle sleep wait for it instead of polling.
+    expect(await heartbeat.nextAgentTimerAt(new Date("2026-07-15T12:00:00Z")))
+      .toBe(Date.parse("2026-07-15T20:00:00Z"));
+    // Inside the window an overdue timer stays due now.
+    expect(await heartbeat.nextAgentTimerAt(new Date("2026-07-15T21:00:00Z")))
+      .toBeLessThanOrEqual(Date.parse("2026-07-15T21:00:00Z"));
+    // A window that never opens has no deadline.
+    await db.update(agents).set({ runtimeConfig: { heartbeat: { enabled: true, intervalSec: 60,
+      activeHours: { start: "09:00", end: "09:00", timezone: "UTC" } } } }).where(eq(agents.id, ids.agentId));
+    expect(await heartbeat.nextAgentTimerAt(new Date("2026-07-15T12:00:00Z"))).toBeNull();
+  });
 });

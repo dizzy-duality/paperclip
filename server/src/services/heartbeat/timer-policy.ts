@@ -1,5 +1,5 @@
 import { agents, heartbeatRuns, costEvents, issues, type Db } from "@paperclipai/db";
-import { AGENT_DEFAULT_MAX_CONCURRENT_RUNS, compareCents, parseActiveHours } from "@paperclipai/shared";
+import { AGENT_DEFAULT_MAX_CONCURRENT_RUNS, compareCents, isWithinActiveHours, nextActiveHoursOpening, parseActiveHours } from "@paperclipai/shared";
 import { and, eq, gte, lt, notInArray, sql, isNull, inArray, type SQL } from "drizzle-orm";
 import { asBoolean, asNumber, parseObject } from "../../adapters/utils.js";
 import { isHeartbeatWakeOnDemandEnabled } from "../heartbeat-policy.js";
@@ -139,8 +139,18 @@ export function projectTimerHeartbeatSchedule(agent: TimerAgent, now: Date,
     return { deadline: null, policy, actionable: null, cap: null };
   if (input.actionable === false) return { deadline: null, policy, actionable: false, cap: null };
   const dueAt = new Date(agent.lastHeartbeatAt ?? agent.createdAt).getTime() + policy.intervalSec * 1000;
-  return { deadline: input.cap ? Math.max(dueAt, currentUtcDayWindow(now).end.getTime()) : dueAt,
-    policy, actionable: input.actionable, cap: input.cap };
+  let deadline = input.cap ? Math.max(dueAt, currentUtcDayWindow(now).end.getTime()) : dueAt;
+  // Outside the agent's active hours the timer is skipped, so its deadline is
+  // the next opening at or after the due time (never, when the window is empty).
+  if (policy.activeHours) {
+    const from = new Date(Math.max(deadline, now.getTime()));
+    if (!isWithinActiveHours(policy.activeHours, from)) {
+      const opening = nextActiveHoursOpening(policy.activeHours, from);
+      if (!opening) return { deadline: null, policy, actionable: input.actionable, cap: input.cap };
+      deadline = opening.getTime();
+    }
+  }
+  return { deadline, policy, actionable: input.actionable, cap: input.cap };
 }
 
 export function createHeartbeatTimerPolicy(db: Pick<Db, "select">) {
