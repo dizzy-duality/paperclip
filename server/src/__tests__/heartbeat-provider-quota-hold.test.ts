@@ -19,6 +19,7 @@ import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.j
 import { registerServerAdapter, unregisterServerAdapter } from "../adapters/index.ts";
 import { heartbeatService } from "../services/heartbeat.ts";
 import { createDeliveryWorkCoordinator } from "../services/delivery-work-coordinator.js";
+import { notifyQueuedRunDispatch } from "../services/run-dispatch-notifications.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -309,6 +310,53 @@ describeEmbeddedPostgres("provider quota hold on queued runs", () => {
     },
     30_000,
   );
+
+  it("makes a run whose hold ended mid-pass due once, then lets the lane go quiet", async () => {
+    const ids = await insertAgent();
+    await insertFinishedRun(ids, new Date(Date.now() - 60_000), quotaStop(new Date(Date.now() + HOUR_MS)));
+    const runId = await insertQueuedRun(ids);
+    const heartbeat = heartbeatService(db);
+    await heartbeat.resumeQueuedRuns();
+    expect(executedRunIds).not.toContain(runId);
+    // The hold ends after that pass held the run but before the lane asks
+    // for its next deadline.
+    await db.update(heartbeatRuns).set({ resultJson: quotaStop(new Date(Date.now() - 1_000)).resultJson })
+      .where(eq(heartbeatRuns.errorCode, "provider_quota"));
+    const before = Date.now();
+    const due = await heartbeat.nextHeldQueuedRunAt();
+    expect(due).not.toBeNull();
+    expect(due!).toBeGreaterThanOrEqual(before - 1_000);
+    expect(due!).toBeLessThanOrEqual(Date.now());
+    expect(await heartbeat.nextHeldQueuedRunAt()).toBeNull();
+  });
+
+  it("dispatches a held run when its hold ends while another company's notifications are pending", async () => {
+    const ids = await insertAgent();
+    const other = await insertAgent();
+    const resetAt = Date.now() + 3_000;
+    await insertFinishedRun(ids, new Date(Date.now() - 60_000), quotaStop(new Date(resetAt)));
+    const runId = await insertQueuedRun(ids);
+    const errors: unknown[] = [];
+    const coordinator = createDeliveryWorkCoordinator({ owner: db, canRun: () => true, canReconcile: () => true,
+      onError: (error) => errors.push(error) });
+    const heartbeat = heartbeatService(db);
+    try {
+      await heartbeat.registerRunDispatchWork(coordinator, () => true).ready;
+      // Keep a scoped hint for the other company pending across the hold's end,
+      // so every pass around it is scoped to that company.
+      while (Date.now() < resetAt + 3_000) {
+        await db.transaction((tx) => notifyQueuedRunDispatch(tx, { companyId: other.companyId }));
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      }
+      await expect.poll(() => executedRunIds.includes(runId), { timeout: 10_000, interval: 250 }).toBe(true);
+      // Nothing is left to wait for, so the lane goes quiet instead of looping.
+      await expect.poll(() => coordinator.nextWakeAt(), { timeout: 10_000 }).toBeNull();
+      expect(errors).toEqual([]);
+    } finally {
+      await coordinator.stop();
+      await heartbeat.drainActiveRunExecutions();
+    }
+  }, 40_000);
 
   it("wakes the idle queued-run lane when a run is held outside it", async () => {
     const errors: unknown[] = [];

@@ -28,6 +28,9 @@ export function registerRunDispatchWork(
     next: () => suppressed ? Promise.resolve(null) : owner.nextScheduledRetryAt(),
   });
   const scopes = new Set<string>(["*"]);
+  // dd: when the last held-run deadline was due; a pass at or after it
+  // re-checks every queued run even if scoped hints are also pending.
+  let heldDueAt: number | null = null;
   const queue = registerDeadlineWork(coordinator, DELIVERY_QUEUES.queuedRunDispatch, {
     retryMs: 30_000,
     notificationCoalesceMs: 1_000,
@@ -36,7 +39,8 @@ export function registerRunDispatchWork(
     run: async signal => {
       // dd: a pass at a hold's deadline carries no notification hint; it
       // re-checks every queued run.
-      if (scopes.size === 0) scopes.add("*");
+      if (scopes.size === 0 || (heldDueAt !== null && Date.now() >= heldDueAt)) scopes.add("*");
+      heldDueAt = null;
       const requested = scopes.has("*") ? ["*"] : [...scopes];
       if (requested[0] === "*") scopes.clear();
       else for (const hint of requested) scopes.delete(hint);
@@ -53,7 +57,7 @@ export function registerRunDispatchWork(
         }
       }
     },
-    next: () => owner.nextHeldQueuedRunAt?.() ?? Promise.resolve(null),
+    next: async () => (heldDueAt = await (owner.nextHeldQueuedRunAt?.() ?? Promise.resolve(null))),
   });
   return {
     retries,

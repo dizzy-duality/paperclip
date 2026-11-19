@@ -2181,12 +2181,21 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     let next: number | null = null;
     const now = new Date();
     for (const { agentId } of rows) {
-      if ((await listHeldQueuedRuns(agentId)).length === 0) continue;
+      const heldRuns = await listHeldQueuedRuns(agentId);
+      if (heldRuns.length === 0) continue;
       const agent = await getAgent(agentId);
       if (!agent) continue;
       const policy = parseHeartbeatPolicy(agent);
       const hold = await readAgentRunHold(agent, policy);
-      if (!hold) continue;
+      if (!hold) {
+        // The hold ended but runs it held are still queued (the pass at its
+        // end was scoped elsewhere, or it ended mid-pass): they are due now.
+        // Each such run earns one pass, so one that stays queued for another
+        // reason does not keep the lane looping.
+        const stranded = heldRuns.filter((run) => reportedHeldRunIds.delete(run.id));
+        if (stranded.length > 0) next = now.getTime();
+        continue;
+      }
       const endsAt = hold.reason === "provider_quota"
         ? hold.until?.getTime() ?? null
         : policy.activeHours ? nextActiveHoursOpening(policy.activeHours, now)?.getTime() ?? null : null;
