@@ -12,7 +12,7 @@ import {
 } from "@paperclipai/db";
 import type { ProjectGitAuthorization } from "@paperclipai/shared";
 import { forbidden, notFound } from "../errors.js";
-import { resolveManagedGitHubCredential } from "./git-credentials.js";
+import { githubGrantHasRepositoryAccess, resolveManagedGitHubCredential } from "./git-credentials.js";
 import { resolveGitHubOperationCredentials } from "./github-operation-credentials.js";
 import { normalizeProjectRepositoryUrl, projectRepositoryIsPrivate } from "./project-repositories.js";
 import { recordProjectLifecycleEvent } from "./resource-lifecycle-events.js";
@@ -83,8 +83,8 @@ export function projectGitAuthorizationService(db: Db) {
       ({ grant, connection }) =>
         (connection.config?.sourceTemplateKey === "github" ||
           connection.transportConfig?.sourceTemplateKey === "github") &&
-        grant.providerTenant?.github?.repositoryCount &&
-        grant.providerTenant.github.installationCount > 0,
+        !!grant.providerTenant?.github &&
+        githubGrantHasRepositoryAccess(grant.providerTenant.github),
     );
   }
   async function read(companyId: string, projectId: string, userId: string): Promise<ProjectGitAuthorization> {

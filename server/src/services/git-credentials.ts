@@ -27,6 +27,17 @@ import { toolAccessService } from "./tool-access.js";
  * example a brokered GitHub connection): swap the factory, keep every call site unchanged.
  */
 
+/** Whether a GitHub grant can reach any repository. A personal access token has
+ * no GitHub App installations; its access is its repository count
+ * (tool-access loadGitHubPatGrantMetadata). */
+export function githubGrantHasRepositoryAccess(github: {
+  credentialKind?: "personal_access_token";
+  installationCount: number;
+  repositoryCount: number;
+}): boolean {
+  return (github.credentialKind === "personal_access_token" || github.installationCount > 0) && github.repositoryCount > 0;
+}
+
 /** Company-secret names probed for a GitHub token, in priority order. */
 export const DEFAULT_GITHUB_TOKEN_SECRET_NAMES = ["GITHUB_TOKEN", "GH_TOKEN", "PAPERCLIP_GITHUB_TOKEN"] as const;
 
@@ -526,8 +537,7 @@ export async function resolveManagedGitHubIdentitySelection(
     if (candidates.length === 1) return true;
     const github = grant.providerTenant?.github;
     const ref = grant.credentialSecretRefs.find((ref) => ref.configPath === "oauth.access_token");
-    return Boolean(github && (github.credentialKind === "personal_access_token" || github.installationCount > 0)
-      && github.repositoryCount > 0 && ref
+    return Boolean(github && githubGrantHasRepositoryAccess(github) && ref
       && credentialRecords.some((secret) => secret.id === ref.secretId
         && secret.status === "active" && !secret.deletedAt
         && (grant.kind === "user"
@@ -641,9 +651,7 @@ export async function resolveManagedGitHubCredential(
     const accessRef = grant.credentialSecretRefs.find((ref) => ref.configPath === "oauth.access_token");
     const github = grant.providerTenant?.github;
     if (!accessRef || !github) return { configured: true, identitySource: selection.identitySource, diagnostic: selection.diagnostic, error: "The managed GitHub identity is incomplete" };
-    // A personal access token has no GitHub App installations; its access is
-    // its repository count (tool-access loadGitHubPatGrantMetadata).
-    if ((github.credentialKind !== "personal_access_token" && github.installationCount < 1) || github.repositoryCount < 1) {
+    if (!githubGrantHasRepositoryAccess(github)) {
       return { configured: true, identitySource: selection.identitySource, diagnostic: selection.diagnostic, error: "The managed GitHub identity no longer has repository access" };
     }
     const accessContext = {
