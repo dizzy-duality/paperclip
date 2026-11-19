@@ -1623,6 +1623,41 @@ describe("sandbox callback bridge", () => {
     }
   });
 
+  it("admits the documented case API and denies case deletes, locks, restores and uploads", () => {
+    const allowed: Array<{ method: string; path: string }> = [
+      { method: "POST", path: "/api/companies/co-1/cases" },
+      { method: "GET", path: "/api/companies/co-1/cases" },
+      { method: "GET", path: "/api/issues/issue-1/cases" },
+      { method: "GET", path: "/api/cases/PAP-C42" },
+      { method: "PATCH", path: "/api/cases/PAP-C42" },
+      { method: "GET", path: "/api/cases/PAP-C42/events" },
+      { method: "POST", path: "/api/cases/PAP-C42/links" },
+      { method: "GET", path: "/api/cases/PAP-C42/documents/profile" },
+      { method: "GET", path: "/api/cases/PAP-C42/documents/profile/revisions" },
+      { method: "PUT", path: "/api/cases/PAP-C42/documents/profile" },
+    ];
+    for (const request of allowed) {
+      expect(authorizeSandboxCallbackBridgeRequestWithRoutes(request)).toBeNull();
+    }
+
+    const denied: Array<{ method: string; path: string }> = [
+      { method: "DELETE", path: "/api/cases/PAP-C42" },
+      { method: "DELETE", path: "/api/cases/PAP-C42/documents/profile" },
+      { method: "POST", path: "/api/cases/PAP-C42/documents/profile/lock" },
+      { method: "POST", path: "/api/cases/PAP-C42/documents/profile/unlock" },
+      { method: "POST", path: "/api/cases/PAP-C42/documents/profile/revisions/rev-1/restore" },
+      { method: "POST", path: "/api/cases/PAP-C42/attachments" },
+      { method: "PUT", path: "/api/cases/PAP-C42/documents/profile/revisions" },
+      { method: "GET", path: "/api/cases/PAP-C42/documents/profile/annotations" },
+      { method: "PATCH", path: "/api/companies/co-1/cases" },
+    ];
+    for (const request of denied) {
+      expect(authorizeSandboxCallbackBridgeRequestWithRoutes(request)).toBe(
+        `Route not allowed: ${request.method} ${request.path}`,
+      );
+    }
+  });
+
   it("admits listing, uploads and downloads on the default queue route list", () => {
     const attachmentRequests: Array<{ method: string; path: string }> = [
       { method: "GET", path: "/api/issues/issue-1/attachments" },
