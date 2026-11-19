@@ -74,6 +74,10 @@ const REMOTE_MANAGED_ADAPTERS = new Set<AgentAdapterType>([
   "kimi_local",
   "opencode_local",
   "pi_local",
+  // dd: our add-on agy adapter (dizzy-duality/agy-paperclip-adapter) runs in
+  // sandbox agent pods. Until 1023 the server image patched this list after the
+  // build; 1117 bundles the server, so the patch must live in the source.
+  "agy_local",
 ]);
 
 export function adapterSupportsRemoteManagedEnvironments(adapterType: string): boolean {
