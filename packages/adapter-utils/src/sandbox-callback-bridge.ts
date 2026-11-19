@@ -200,6 +200,20 @@ export const DEFAULT_SANDBOX_CALLBACK_BRIDGE_ROUTE_ALLOWLIST: readonly SandboxCa
   { method: "POST", path: /^\/api\/issues\/[^/]+\/work-products$/ },
   { method: "PATCH", path: /^\/api\/work-products\/[^/]+$/ },
 
+  // Cases (skills/paperclip/references/cases.md): upsert, read, update, keyed
+  // documents, events and issue links. The controller still enforces company
+  // access and the experimental.enableCases flag. Deleting documents, locks,
+  // revision restore and case attachments (multipart) stay denied.
+  { method: "POST", path: /^\/api\/companies\/[^/]+\/cases$/ },
+  { method: "GET", path: /^\/api\/companies\/[^/]+\/cases$/ },
+  { method: "GET", path: /^\/api\/issues\/[^/]+\/cases$/ },
+  { method: "GET", path: /^\/api\/cases\/[^/]+$/ },
+  { method: "PATCH", path: /^\/api\/cases\/[^/]+$/ },
+  { method: "GET", path: /^\/api\/cases\/[^/]+\/events$/ },
+  { method: "POST", path: /^\/api\/cases\/[^/]+\/links$/ },
+  { method: "GET", path: /^\/api\/cases\/[^/]+\/documents\/[^/]+(?:\/revisions)?$/ },
+  { method: "PUT", path: /^\/api\/cases\/[^/]+\/documents\/[^/]+$/ },
+
   // Issue-thread interactions (create, resolve, verdict, and withdraw)
   { method: "GET", path: /^\/api\/issues\/[^/]+\/interactions(?:\/[^/]+)?$/ },
   { method: "POST", path: /^\/api\/issues\/[^/]+\/interactions$/ },
