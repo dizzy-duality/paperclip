@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { claudeLocalReasoningEffortsForModel, DEFAULT_CLAUDE_LOCAL_MODEL, resolveClaudeModel } from "./index.js";
+import { claudeLocalReasoningEffortsForModel, DEFAULT_CLAUDE_LOCAL_MODEL, models, resolveClaudeModel } from "./index.js";
 import { minimumClaudeCliVersionForModel } from "./server/cli-capabilities.js";
 
 describe("Claude model defaults", () => {
@@ -16,6 +16,21 @@ describe("Claude model defaults", () => {
   ])("requires CLI 2.1.284 and offers all efforts for %s", (model) => {
     expect(minimumClaudeCliVersionForModel(model)).toBe("2.1.284");
     expect(claudeLocalReasoningEffortsForModel(model)).toEqual(["low", "medium", "high", "xhigh", "max"]);
+  });
+
+  it.each([
+    "claude-fable-5-2",
+    "claude-fable-5-2[1m]",
+    "global.anthropic.claude-fable-5-2",
+  ])("requires CLI 2.1.321 and offers all efforts for %s", (model) => {
+    expect(minimumClaudeCliVersionForModel(model)).toBe("2.1.321");
+    expect(claudeLocalReasoningEffortsForModel(model)).toEqual(["low", "medium", "high", "xhigh", "max"]);
+  });
+
+  it("lists Fable 5.2 first and keeps Fable 5.1 selectable", () => {
+    const ids = models.map((model) => model.id);
+    expect(ids[0]).toBe("claude-fable-5-2");
+    expect(ids).toContain("claude-fable-5-1");
   });
 
   it("keeps model-specific Claude reasoning limits", () => {

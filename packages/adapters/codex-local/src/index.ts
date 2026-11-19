@@ -13,6 +13,8 @@ export const SANDBOX_INSTALL_COMMAND = "npm install -g @openai/codex";
 export const DEFAULT_CODEX_LOCAL_MODEL = PAPERCLIP_RUNNER_DEFAULT_MODELS.codex;
 export const DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX = true;
 export const CODEX_LOCAL_FAST_MODE_SUPPORTED_MODELS = [
+  "gpt-6.2-sol",
+  "gpt-6.2-astra",
   "gpt-6-astra",
   "gpt-6.1-sol",
   "gpt-6-sol",
@@ -71,6 +73,8 @@ export function codexLocalReasoningEffortsForModel(
 ): readonly CodexLocalReasoningEffort[] {
   const normalizedModel = normalizeCodexModel(model);
   switch (normalizedModel) {
+    case "gpt-6.2-sol":
+    case "gpt-6.2-astra":
     case "gpt-6-astra":
     case "gpt-6.1-sol":
     case "gpt-6-sol":
@@ -90,9 +94,14 @@ export function codexLocalReasoningEffortsForModel(
 // "The '<model>' model is not supported when using Codex with a ChatGPT account.", which reads
 // like an account problem when it is really a stale install, typically a sandbox image baked
 // before the catalog gained the model. Record the oldest stable release verified to work so the
-// Test and the remote runner can name the actual gap. Omit models with no verified floor; the
-// install pin in the runner and images is always at or above every floor listed here.
+// Test and the remote runner can name the actual gap. Omit models with no verified floor. A floor
+// above the runner's install pin keeps the model usable only where a newer CLI is installed.
 const CODEX_LOCAL_MODEL_MINIMUM_CLI_VERSIONS: Readonly<Record<string, string>> = {
+  // 0.169.1 is the first release whose bundled catalog lists GPT-6.2 (0.169.0 does not), though
+  // the catalog entry declares minimal_client_version 0.166.0. The runner pin is still older, so
+  // remote runs fall back to gpt-6.1-sol / gpt-6-astra with a visible message until it moves.
+  "gpt-6.2-sol": "0.169.1",
+  "gpt-6.2-astra": "0.169.1",
   // 0.156.1 and older are rejected (openai/codex#49396); 0.159.0 and 0.159.2 are accepted
   // (openai/codex#49464). No stable release between those was verified either way.
   "gpt-6.1-sol": "0.159.0",
@@ -166,6 +175,8 @@ export function isCodexLocalFastModeSupported(model: string | null | undefined):
 // then by decreasing capability inside each version, older models at the end. The server
 // returns this list as written and the model dropdown keeps its order.
 export const models = [
+  { id: "gpt-6.2-sol", label: "gpt-6.2-sol" },
+  { id: "gpt-6.2-astra", label: "gpt-6.2-astra" },
   { id: "gpt-6.1-sol", label: "gpt-6.1-sol" },
   { id: "gpt-6-astra", label: "gpt-6-astra" },
   { id: "gpt-6-sol", label: "gpt-6-sol" },
@@ -198,7 +209,7 @@ Core fields:
 - modelReasoningEffort (string, optional): reasoning effort override passed via -c model_reasoning_effort=...; GPT-6 Astra, GPT-6.1 Sol, GPT-6 Sol, and GPT-5.6 Sol/Terra support low|medium|high|xhigh|max|ultra; GPT-6 Luna and GPT-5.6 Luna support low|medium|high|xhigh|max
 - promptTemplate (string, optional): run prompt template
 - search (boolean, optional): run codex with --search
-- fastMode (boolean, optional): enable Codex Fast mode; supported on GPT-6 (astra/sol/luna), GPT-6.1 Sol, GPT-5.6 (sol/terra/luna), GPT-5.5, GPT-5.4 and passed through for manual model IDs
+- fastMode (boolean, optional): enable Codex Fast mode; supported on GPT-6.2 (sol/astra), GPT-6 (astra/sol/luna), GPT-6.1 Sol, GPT-5.6 (sol/terra/luna), GPT-5.5, GPT-5.4 and passed through for manual model IDs
 - dangerouslyBypassApprovalsAndSandbox (boolean, optional): run with bypass flag
 - command (string, optional): defaults to "codex"
 - extraArgs (string[], optional): additional CLI args
@@ -229,8 +240,8 @@ Notes:
 - Paperclip injects desired local skills into the effective CODEX_HOME/skills/ directory at execution time so Codex can discover "$paperclip" and related skills without polluting the project working directory. For new and updated agents, Paperclip assigns an isolated managed home at ~/.paperclip/instances/<id>/companies/<companyId>/agents/<agentId>/codex-home/skills/; when CODEX_HOME is explicitly overridden in adapter config, that override is used instead.
 - New and updated codex_local agents persist an empty OPENAI_API_KEY override by default so a host-level OPENAI_API_KEY cannot leak into Codex runs through process inheritance. Explicit CODEX_HOME overrides must not point at the shared company codex-home, $CODEX_HOME, or ~/.codex.
 - Some model/tool combinations reject certain effort levels (for example minimal with web search enabled).
-- With ChatGPT sign-in, the Codex backend accepts a model only from a recent enough Codex CLI: GPT-6.1 Sol needs 0.159.0 or newer, GPT-6 Sol and GPT-6 Luna need 0.157.0 or newer. An older CLI fails every turn with "The '<model>' model is not supported when using Codex with a ChatGPT account." The environment Test and the remote runner compare the installed \`codex --version\` against these floors before running; in a managed sandbox, the fix is a sandbox image that ships the Codex version Paperclip pins.
-- Fast mode is supported on GPT-6 (astra/sol/luna), GPT-6.1 Sol, GPT-5.6 (sol/terra/luna), GPT-5.5, GPT-5.4 and manual model IDs. When enabled for those models, Paperclip applies \`service_tier="fast"\` and \`features.fast_mode=true\`.
+- With ChatGPT sign-in, the Codex backend accepts a model only from a recent enough Codex CLI: GPT-6.2 Sol and GPT-6.2 Astra need 0.169.1 or newer, GPT-6.1 Sol needs 0.159.0 or newer, GPT-6 Sol and GPT-6 Luna need 0.157.0 or newer. An older CLI fails every turn with "The '<model>' model is not supported when using Codex with a ChatGPT account." The environment Test and the remote runner compare the installed \`codex --version\` against these floors before running; in a managed sandbox, the fix is a sandbox image that ships the Codex version Paperclip pins.
+- Fast mode is supported on GPT-6.2 (sol/astra), GPT-6 (astra/sol/luna), GPT-6.1 Sol, GPT-5.6 (sol/terra/luna), GPT-5.5, GPT-5.4 and manual model IDs. When enabled for those models, Paperclip applies \`service_tier="fast"\` and \`features.fast_mode=true\`.
 - When Paperclip realizes a workspace/runtime for a run, it injects PAPERCLIP_WORKSPACE_* and PAPERCLIP_RUNTIME_* env vars for agent-side tooling.
 - The ACP engine keeps its workspace sandbox and enables network access on each turn. Explicit sandbox_workspace_write.network_access overrides in extraArgs (or env.PAPERCLIP_CODEX_ACP_NETWORK_ACCESS="false") disable it; execution-target network denial wins. The bundled ACP patch is needed because upstream mode presets override Codex config.toml on every turn.
 - The CLI engine defaults to a writable workspace sandbox with network access for unattended work and Paperclip API calls. It does not enable the dangerous bypass flag. Explicit sandbox modes/profiles and network overrides in extraArgs retain their meaning. An execution-target network denial remains enforced.
