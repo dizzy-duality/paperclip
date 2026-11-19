@@ -9,6 +9,8 @@ export function registerRunDispatchWork(
     promoteDueScheduledRetries(): Promise<unknown>;
     nextScheduledRetryAt(): Promise<number | null>;
     resumeQueuedRunsAfterDrain(scope?: RunDispatchScope): Promise<unknown>;
+    /** dd: when the earliest provider-quota or active-hours hold ends. */
+    nextHeldQueuedRunAt?(): Promise<number | null>;
     schedulingSuppressed(): Promise<boolean>;
   },
   canRun: () => boolean,
@@ -32,6 +34,9 @@ export function registerRunDispatchWork(
     canRun,
     onSettled: hints => { for (const hint of hints ?? ["*"]) scopes.add(hint); },
     run: async signal => {
+      // dd: a pass at a hold's deadline carries no notification hint; it
+      // re-checks every queued run.
+      if (scopes.size === 0) scopes.add("*");
       const requested = scopes.has("*") ? ["*"] : [...scopes];
       if (requested[0] === "*") scopes.clear();
       else for (const hint of requested) scopes.delete(hint);
@@ -48,7 +53,7 @@ export function registerRunDispatchWork(
         }
       }
     },
-    next: async () => null,
+    next: () => owner.nextHeldQueuedRunAt?.() ?? Promise.resolve(null),
   });
   return {
     retries,

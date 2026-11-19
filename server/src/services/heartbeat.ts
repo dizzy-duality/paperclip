@@ -1359,6 +1359,7 @@ export function heartbeatService(
     claimDueTimerHeartbeat,
     getAgentRunHold,
     resumeHeldRun,
+    nextHeldQueuedRunAt,
   } = heartbeatQueue;
 
   // Earlier factories capture these callbacks before queue construction.
@@ -4460,12 +4461,14 @@ export function heartbeatService(
         promoteDueScheduledRetries,
         nextScheduledRetryAt,
         resumeQueuedRunsAfterDrain,
+        nextHeldQueuedRunAt,
         schedulingSuppressed: async () => (await getSchedulingSuppression(true)).suppressed,
       }, () => canRun() && readTaskDrain(new Date()) === null),
     promoteDueScheduledRetries,
     retryScheduledRetryNow,
     getAgentRunHold,
     resumeHeldRun,
+    nextHeldQueuedRunAt,
 
     resumeQueuedRuns,
 

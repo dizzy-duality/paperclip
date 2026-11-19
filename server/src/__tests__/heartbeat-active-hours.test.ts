@@ -177,4 +177,16 @@ describeEmbeddedPostgres("agent active hours", () => {
       activeHours: { start: "09:00", end: "09:00", timezone: "UTC" } } } }).where(eq(agents.id, ids.agentId));
     expect(await heartbeat.nextAgentTimerAt(new Date("2026-07-15T12:00:00Z"))).toBeNull();
   });
+
+  it("reports when an off-hours hold ends, so the queued-run lane can wake for it", async () => {
+    const ids = await insertAgent(windowAroundNow(false));
+    const runId = await insertQueuedRun(ids);
+    expect(await startedAfterResume(runId)).toBe(false);
+    const [agent] = await db.select().from(agents).where(eq(agents.id, ids.agentId));
+    const hours = (agent!.runtimeConfig as { heartbeat: { activeHours: { start: string } } }).heartbeat.activeHours;
+    const at = await heartbeatService(db).nextHeldQueuedRunAt();
+    expect(at).not.toBeNull();
+    expect(at!).toBeGreaterThan(Date.now());
+    expect(new Date(at!).toISOString().slice(11, 16)).toBe(hours.start);
+  });
 });
