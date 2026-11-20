@@ -14,7 +14,16 @@ export interface PodTemplateView {
       fsGroupChangePolicy: string;
       seccompProfile: { type: string };
     };
+    // dd fork: the init container creates the run user's working directory.
+    initContainers: {
+      image: string;
+      command: string[];
+      securityContext: Record<string, unknown>;
+      volumeMounts: { name: string; mountPath: string }[];
+      resources: { requests: Record<string, string>; limits: Record<string, string> };
+    }[];
     containers: {
+      image: string;
       command: string[];
       envFrom: { secretRef: { name: string } }[];
       securityContext: {

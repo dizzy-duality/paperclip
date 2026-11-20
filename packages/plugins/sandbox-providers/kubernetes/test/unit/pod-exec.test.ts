@@ -7,10 +7,13 @@ import type { PassThrough } from "node:stream";
 // the success path, reports an exit status. This exercises the host-side stdout
 // accumulation cap without a real cluster.
 type StatusCb = (status: {
+  reason?: string;
+  message?: string;
   status: string;
   details?: { causes?: { reason?: string; message?: string }[] };
 }) => void;
 
+let setupError: unknown = null;
 let scriptedExec: (
   stdout: PassThrough,
   stderr: PassThrough,
@@ -32,6 +35,7 @@ vi.mock("@kubernetes/client-node", () => {
       _tty: boolean,
       statusCb: StatusCb,
     ) {
+      if (setupError) throw setupError;
       // Defer so the caller has wired its stream listeners first.
       setImmediate(() => scriptedExec(stdout, stderr, statusCb, stdin));
       return { close() {} };
@@ -40,7 +44,7 @@ vi.mock("@kubernetes/client-node", () => {
   return { Exec };
 });
 
-const { execInPod, execInPodStreaming } = await import("../../src/pod-exec.js");
+const { ExecSetupError, execInPod, execInPodStreaming, retryExecSetup } = await import("../../src/pod-exec.js");
 
 const KC = {} as never;
 
@@ -234,5 +238,106 @@ describe("execInPodStreaming", () => {
         timeoutMs: 5_000,
       }),
     ).rejects.toThrow(/disk guard/i);
+  });
+});
+
+// A failure status without an ExitCode cause comes from the API server or the
+// kubelet, not the command. Reporting it as a bare exit 1 left runs failing
+// with "could not stage the run environment in the pod:" and nothing after it.
+describe("exec status without an exit code", () => {
+  const refused = (stdout: PassThrough, stderr: PassThrough, statusCb: StatusCb) => {
+    stdout.end();
+    stderr.end();
+    statusCb({ status: "Failure", reason: "InternalError", message: "container not running" });
+  };
+
+  it("execInPod reports the API reason and message on stderr", async () => {
+    scriptedExec = refused;
+    const result = await execInPod(KC, "ns", "pod", "agent", ["/bin/sh", "-c", ":"], undefined, 5_000);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toBe("[kubernetes exec Failure] InternalError: container not running");
+  });
+
+  it("execInPodStreaming reports it after the command's own stderr", async () => {
+    scriptedExec = (stdout, stderr, statusCb) => {
+      stderr.write("partial\n");
+      refused(stdout, stderr, statusCb);
+    };
+    const result = await execInPodStreaming(KC, "ns", "pod", "agent", ["/bin/sh", "-c", ":"], { timeoutMs: 5_000 });
+    expect(result).toEqual({
+      exitCode: 1,
+      stderr: "partial\n[kubernetes exec Failure] InternalError: container not running",
+    });
+  });
+
+  it("keeps a command's own exit code and stderr unchanged", async () => {
+    scriptedExec = (stdout, stderr, statusCb) => {
+      stderr.write("mkdir: cannot create directory");
+      stdout.end();
+      stderr.end();
+      statusCb({
+        status: "Failure",
+        reason: "NonZeroExitCode",
+        message: "command terminated with non-zero exit code",
+        details: { causes: [{ reason: "ExitCode", message: "2" }] },
+      });
+    };
+    const result = await execInPod(KC, "ns", "pod", "agent", ["/bin/sh", "-c", ":"], undefined, 5_000);
+    expect(result).toEqual({ exitCode: 2, stdout: "", stderr: "mkdir: cannot create directory" });
+  });
+});
+
+describe("exec that never opened", () => {
+  it("rejects with ExecSetupError carrying the WebSocket event's message", async () => {
+    // client-node rejects with a WebSocket ErrorEvent, not an Error.
+    setupError = { type: "error", message: "Unexpected server response: 500" };
+    try {
+      const failure = execInPod(KC, "ns", "pod", "agent", ["/bin/sh", "-c", ":"], undefined, 5_000);
+      await expect(failure).rejects.toBeInstanceOf(ExecSetupError);
+      await expect(failure).rejects.toThrow("kubernetes exec could not be opened: Unexpected server response: 500");
+    } finally {
+      setupError = null;
+    }
+  });
+});
+
+describe("retryExecSetup", () => {
+  const ok = { exitCode: 0, stdout: "", stderr: "" };
+  const apiFailure = { exitCode: 1, stdout: "", stderr: "x", apiFailure: true as const };
+  const opts = (retryApiFailure: boolean, remaining = 10_000) => ({
+    retryApiFailure,
+    remainingMs: () => remaining,
+    delaysMs: [0, 0],
+  });
+
+  it("re-runs after a setup error, at most twice", async () => {
+    const run = vi.fn()
+      .mockRejectedValueOnce(new ExecSetupError("a"))
+      .mockRejectedValueOnce(new ExecSetupError("b"))
+      .mockRejectedValueOnce(new ExecSetupError("c"));
+    await expect(retryExecSetup(run, opts(false))).rejects.toThrow(/c$/);
+    expect(run).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not re-run after any other error, such as a watchdog timeout", async () => {
+    const run = vi.fn().mockRejectedValue(new Error("execInPod timed out"));
+    await expect(retryExecSetup(run, opts(true))).rejects.toThrow("timed out");
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-runs an API failure only when asked to", async () => {
+    const twice = vi.fn().mockResolvedValueOnce(apiFailure).mockResolvedValueOnce(ok);
+    expect(await retryExecSetup(twice, opts(true))).toEqual(ok);
+    const once = vi.fn().mockResolvedValue(apiFailure);
+    expect(await retryExecSetup(once, opts(false))).toEqual(apiFailure);
+    expect(once).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not re-run once the remaining budget cannot cover the delay", async () => {
+    const run = vi.fn().mockRejectedValue(new ExecSetupError("a"));
+    await expect(
+      retryExecSetup(run, { retryApiFailure: false, remainingMs: () => 100, delaysMs: [500] }),
+    ).rejects.toBeInstanceOf(ExecSetupError);
+    expect(run).toHaveBeenCalledTimes(1);
   });
 });

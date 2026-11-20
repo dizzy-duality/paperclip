@@ -15,6 +15,7 @@ import type {
   PluginEnvironmentSyncInParams,
   PluginEnvironmentSyncOutParams,
   PluginEnvironmentSyncResult,
+  PluginEnvironmentTerminationReceipt,
   PluginEnvironmentValidateConfigParams,
   PluginEnvironmentValidationResult,
 } from "@paperclipai/plugin-sdk";
@@ -26,7 +27,7 @@ import {
 import { createKubeConfig, makeKubeClients } from "./kube-client.js";
 import { getAdapterDefaults, buildAdapterEnv, resolveRunAdapterType } from "./adapter-defaults.js";
 import { resolveImage } from "./image-allowlist.js";
-import { buildJobManifest } from "./pod-spec-builder.js";
+import { WORKSPACE_DIR, buildJobManifest } from "./pod-spec-builder.js";
 import { buildSandboxCrManifest } from "./sandbox-cr-builder.js";
 import { ensureTenant } from "./tenant-orchestrator.js";
 import { createPerRunSecret } from "./secret-manager.js";
@@ -36,9 +37,9 @@ import {
   sandboxCrOrchestrator,
   SandboxCrTimeoutError,
 } from "./sandbox-cr-orchestrator.js";
-import { execInPod, execInPodStreaming, wrapCommandWithEnv } from "./pod-exec.js";
+import { describeExecError, execInPod, execInPodStreaming, retryExecSetup, stageCommandEnv } from "./pod-exec.js";
 import { performSyncIn, performSyncOut, type PodStreamExec } from "./file-sync.js";
-import { checkLeaseResumable, destroyLeaseResources } from "./lease-lifecycle.js";
+import { checkLeaseResumable, destroyLeaseResources, waitForLeaseGone } from "./lease-lifecycle.js";
 import {
   appendNetworkEgressDenyHint,
   createScopedNetworkEgressPolicyOrReleaseWorkload,
@@ -119,10 +120,22 @@ const readySandboxesByLease = new Set<string>();
 const RESUME_READY_TIMEOUT_MS = 30_000;
 const RESUME_READY_POLL_MS = 1_000;
 
-// The workspace remote dir is the confinement root for native file sync. It is
-// recorded on the lease metadata at realizeWorkspace time (`remoteCwd`); require
-// it so a sync can never run without a concrete root to confine every sandbox
-// path against.
+// Extra time a fresh pod may take to become Ready, on top of the command's own
+// timeout. The server bounds each environmentExecute RPC at the requested
+// timeout plus 30 s (RPC_OVERHEAD_BUFFER_MS in plugin-environment-driver.ts),
+// so this must stay below 30 s or the server gives up first. Pre-pulling the
+// runtime image keeps readiness well inside it.
+const READY_GRACE_MS = 25_000;
+
+// The agent pod's workspace mount (see pod-spec-builder / sandbox-cr-builder).
+export { WORKSPACE_DIR };
+
+// The workspace remote dir is the confinement root for native file sync. The
+// lease carries it as `remoteCwd` from acquire/resume onward: the server reads
+// it before realizeWorkspace runs (to build the remote execution target and its
+// runtime dir), and it does not copy realizeWorkspace's metadata back onto the
+// lease (paperclipai/paperclip#13587, #13864). Require it so a sync can never
+// run without a concrete root to confine every sandbox path against.
 function resolveSyncRemoteDir(lease: PluginEnvironmentLease): string {
   const remoteCwd = lease.metadata?.remoteCwd;
   if (typeof remoteCwd === "string" && remoteCwd.trim().length > 0) {
@@ -199,6 +212,15 @@ async function resolveSyncPodExec(
       timeoutMs: io.timeoutMs ?? timeoutMs,
     });
   return { exec, timeoutMs };
+}
+
+// The server starts a message queued behind a stopped run only on this
+// receipt, so it is issued once the workload and its pod are really gone.
+async function terminationReceipt(
+  clients: ReturnType<typeof makeKubeClients>,
+  lease: Parameters<typeof waitForLeaseGone>[1],
+): Promise<PluginEnvironmentTerminationReceipt | void> {
+  if (await waitForLeaseGone(clients, lease)) return { providerLeaseId: lease.name, state: "destroyed" };
 }
 
 const plugin = definePlugin({
@@ -381,6 +403,7 @@ const plugin = definePlugin({
           resources: config.defaultResources ?? {},
           runtimeClassName: config.runtimeClassName,
           imagePullSecrets: config.imagePullSecrets,
+          nodeSelector: config.nodeSelector,
         })
       : buildJobManifest({
           namespace,
@@ -395,6 +418,7 @@ const plugin = definePlugin({
           activeDeadlineSec: config.podActivityDeadlineSec,
           ttlSecondsAfterFinished: config.jobTtlSecondsAfterFinished,
           imagePullSecrets: config.imagePullSecrets,
+          nodeSelector: config.nodeSelector,
         });
 
     const { uid: ownerUid } = await orchestrator.claim(clients, namespace, manifest);
@@ -460,6 +484,8 @@ const plugin = definePlugin({
       // exposes one. Flag the job backend so the server keeps the base64 fallback
       // rather than routing its sync to a hook that would reject immediately.
       nativeFileSyncUnsupported: config.backend !== "sandbox-cr",
+      // The sync root and remote cwd, available before realizeWorkspace runs.
+      remoteCwd: WORKSPACE_DIR,
     };
 
     return {
@@ -539,6 +565,12 @@ const plugin = definePlugin({
       // See acquireLease: only the sandbox-cr backend has a pod-exec channel for
       // native sync, so a resumed job lease must keep the base64 fallback.
       nativeFileSyncUnsupported: leaseBackend !== "sandbox-cr",
+      // Keep a root recorded earlier for this lease; otherwise the pod's mount.
+      remoteCwd:
+        typeof params.leaseMetadata?.remoteCwd === "string" &&
+        params.leaseMetadata.remoteCwd.trim().length > 0
+          ? params.leaseMetadata.remoteCwd.trim()
+          : WORKSPACE_DIR,
     };
 
     return {
@@ -554,12 +586,12 @@ const plugin = definePlugin({
     params: PluginEnvironmentRealizeWorkspaceParams,
   ): Promise<PluginEnvironmentRealizeWorkspaceResult> {
     // The agent pod already has /workspace mounted as an emptyDir at pod
-    // scheduling time (see pod-spec-builder). Nothing to provision here —
-    // we just hand back the cwd. Honor a caller-supplied remotePath if set.
+    // scheduling time, and its init container creates WORKSPACE_DIR as the run
+    // user (see pod-spec-builder). Nothing to provision here — we just hand back the cwd. Honor a caller-supplied remotePath if set.
     const cwd =
       params.workspace.remotePath && params.workspace.remotePath.trim().length > 0
         ? params.workspace.remotePath.trim()
-        : "/workspace";
+        : WORKSPACE_DIR;
     return {
       cwd,
       metadata: {
@@ -571,7 +603,7 @@ const plugin = definePlugin({
 
   async onEnvironmentReleaseLease(
     params: PluginEnvironmentReleaseLeaseParams,
-  ): Promise<void> {
+  ): Promise<PluginEnvironmentTerminationReceipt | void> {
     if (!params.providerLeaseId) return;
     const config = kubernetesProviderConfigSchema.parse(params.config);
     const namespace =
@@ -606,11 +638,19 @@ const plugin = definePlugin({
         ?? (err as { code?: number; statusCode?: number }).statusCode;
       if (code !== 404) throw err;
     }
+    return terminationReceipt(clients, {
+      namespace,
+      name: params.providerLeaseId,
+      backend: leaseBackend,
+      podName: typeof params.leaseMetadata?.podName === "string" && params.leaseMetadata.podName.length > 0
+        ? params.leaseMetadata.podName
+        : null,
+    });
   },
 
   async onEnvironmentDestroyLease(
     params: PluginEnvironmentDestroyLeaseParams,
-  ): Promise<void> {
+  ): Promise<PluginEnvironmentTerminationReceipt | void> {
     if (!params.providerLeaseId) return;
     const config = kubernetesProviderConfigSchema.parse(params.config);
     const namespace =
@@ -651,6 +691,7 @@ const plugin = definePlugin({
       podName,
       secretName,
     });
+    return terminationReceipt(clients, { namespace, name: params.providerLeaseId, backend: leaseBackend, podName });
   },
 
   async onEnvironmentExecute(
@@ -709,10 +750,39 @@ const plugin = definePlugin({
       // declaration for rationale.
       const podAlreadyKnownReady = readySandboxesByLease.has(lease.providerLeaseId);
 
-      // The caller's timeout is a budget for the WHOLE execute call: readiness
-      // wait + exec must share it, or the first exec on a fresh lease could
-      // block for up to twice the requested timeout.
+      // Waiting for a fresh pod (scheduling, image pull) gets READY_GRACE_MS on
+      // top of the caller's timeout, and the command keeps its full timeout as
+      // long as readiness fits in that grace. It used to come out of the
+      // caller's timeout alone, so the first command on a node that still had
+      // to pull the image (16 s for the 333 MB Claude runtime) ran out of a
+      // 15 s budget before it started.
       const executeStartedAt = Date.now();
+      const executeBudgetMs = effectiveTimeoutMs + READY_GRACE_MS;
+      const executeDeadline = executeStartedAt + executeBudgetMs;
+      // Time left for the next exec: the command's own timeout, cut short only
+      // when readiness (and staging) used more than the grace. Every exec of
+      // this call draws on the same deadline, so together they stay inside the
+      // server's RPC deadline; 0 means the budget is spent.
+      const commandTimeoutMs = () =>
+        Math.max(0, Math.min(effectiveTimeoutMs, executeDeadline - Date.now()));
+      // A retry must never start with no budget: execInPod treats 0 as "no limit".
+      const budgetedTimeoutMs = () => {
+        const ms = commandTimeoutMs();
+        if (ms === 0) throw new Error(`execute budget of ${executeBudgetMs}ms spent`);
+        return ms;
+      };
+      const budgetSpent = (stage: string) => ({
+        exitCode: null,
+        timedOut: true,
+        stdout: "",
+        stderr: `execute budget of ${executeBudgetMs}ms spent before ${stage}`,
+        metadata: {
+          provider: "kubernetes",
+          backend: "sandbox-cr",
+          namespace,
+          sandboxName: lease.providerLeaseId,
+        },
+      });
 
       if (!podAlreadyKnownReady) {
         try {
@@ -720,7 +790,7 @@ const plugin = definePlugin({
             clients,
             namespace,
             lease.providerLeaseId,
-            { timeoutMs: effectiveTimeoutMs, pollMs: 2000 },
+            { timeoutMs: executeBudgetMs, pollMs: 2000 },
           );
           readySandboxesByLease.add(lease.providerLeaseId);
         } catch (err) {
@@ -729,7 +799,7 @@ const plugin = definePlugin({
               exitCode: null,
               timedOut: true,
               stdout: "",
-              stderr: `Sandbox pod did not become Ready within ${effectiveTimeoutMs}ms`,
+              stderr: `Sandbox pod did not become Ready within ${executeBudgetMs}ms`,
               metadata: {
                 provider: "kubernetes",
                 backend: "sandbox-cr",
@@ -816,10 +886,8 @@ const plugin = definePlugin({
           // The flush shares the caller's single execute budget (same contract
           // as the normal exec path below) and surfaces watchdog/WebSocket
           // failures as a timed-out result instead of an uncaught throw.
-          const flushTimeoutMs = Math.max(
-            5_000,
-            effectiveTimeoutMs - (Date.now() - executeStartedAt),
-          );
+          const flushTimeoutMs = commandTimeoutMs();
+          if (flushTimeoutMs === 0) return budgetSpent("the upload");
           let flushResult: { exitCode: number; stdout: string; stderr: string };
           try {
             flushResult = await execInPod(
@@ -836,7 +904,7 @@ const plugin = definePlugin({
               exitCode: null,
               timedOut: true,
               stdout: "",
-              stderr: `fast-upload flush failed: ${err instanceof Error ? err.message : String(err)}`,
+              stderr: `fast-upload flush failed: ${describeExecError(err)}`,
               metadata: {
                 provider: "kubernetes",
                 backend: "sandbox-cr",
@@ -878,26 +946,65 @@ const plugin = definePlugin({
       // OpenCode config, plus helper settings like small_model/provider routing) never
       // reaches the harness, which falls back to its in-image HOME config -> wrong or
       // partial behaviour.
-      const execCommand = wrapCommandWithEnv(baseExecCommand, params.env);
+      // The values go to the pod over stdin, never on a command line (see
+      // stageCommandEnv in pod-exec.ts).
+      const staged = stageCommandEnv(baseExecCommand, params.env);
+      const execMetadata = {
+        provider: "kubernetes",
+        backend: "sandbox-cr",
+        namespace,
+        sandboxName: lease.providerLeaseId,
+        podName,
+      };
+      if (staged) {
+        const stageTimeoutMs = commandTimeoutMs();
+        if (stageTimeoutMs === 0) return budgetSpent("staging the run environment");
+        try {
+          // Staging writes a fresh uniquely named file, so it is safe to run
+          // again after any failure that did not come from the command itself.
+          const stageResult = await retryExecSetup(
+            () => execInPod(kc, namespace, podName, "agent", staged.stageCommand, staged.stageStdin, budgetedTimeoutMs()),
+            { retryApiFailure: true, remainingMs: commandTimeoutMs },
+          );
+          if (stageResult.exitCode !== 0) {
+            return {
+              exitCode: stageResult.exitCode,
+              timedOut: false,
+              stdout: "",
+              stderr: `could not stage the run environment in the pod: ${stageResult.stderr}`,
+              metadata: execMetadata,
+            };
+          }
+        } catch (err) {
+          return {
+            exitCode: null,
+            timedOut: true,
+            stdout: "",
+            stderr: `could not stage the run environment in the pod: ${describeExecError(err)}`,
+            metadata: execMetadata,
+          };
+        }
+      }
+      const execCommand = staged ? staged.runCommand : baseExecCommand;
 
-      // Remaining share of the caller's budget after the readiness wait (floor
-      // of 5s so an exec attempt is still made when readiness consumed most of
-      // it; the watchdog then bounds it tightly).
-      const remainingTimeoutMs = Math.max(
-        5_000,
-        effectiveTimeoutMs - (Date.now() - executeStartedAt),
-      );
+      const remainingTimeoutMs = commandTimeoutMs();
+      if (remainingTimeoutMs === 0) return budgetSpent("the command");
 
       let execResult: { exitCode: number; stdout: string; stderr: string };
       try {
-        execResult = await execInPod(
-          kc,
-          namespace,
-          podName,
-          "agent",
-          execCommand,
-          typeof params.stdin === "string" ? params.stdin : undefined,
-          remainingTimeoutMs,
+        // Only an exec whose WebSocket never opened is re-run: the command
+        // had not started. Any later failure may have run it.
+        execResult = await retryExecSetup(
+          () => execInPod(
+            kc,
+            namespace,
+            podName,
+            "agent",
+            execCommand,
+            typeof params.stdin === "string" ? params.stdin : undefined,
+            budgetedTimeoutMs(),
+          ),
+          { retryApiFailure: false, remainingMs: commandTimeoutMs },
         );
       } catch (err) {
         // Watchdog-fired or WebSocket-setup error. Surface as a timeout so
@@ -906,7 +1013,7 @@ const plugin = definePlugin({
           exitCode: null,
           timedOut: true,
           stdout: "",
-          stderr: appendNetworkEgressDenyHint(err instanceof Error ? err.message : String(err), scopedNetworkEgress),
+          stderr: appendNetworkEgressDenyHint(describeExecError(err), scopedNetworkEgress),
           metadata: {
             provider: "kubernetes",
             backend: "sandbox-cr",

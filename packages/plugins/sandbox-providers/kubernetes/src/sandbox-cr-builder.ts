@@ -1,3 +1,4 @@
+import { workspaceInitContainer } from "./pod-spec-builder.js";
 /**
  * Builds a kubernetes-sigs/agent-sandbox Sandbox CR manifest.
  *
@@ -30,6 +31,7 @@ export interface BuildSandboxCrManifestInput {
   };
   runtimeClassName?: string;
   imagePullSecrets?: string[];
+  nodeSelector?: Record<string, string>;
 }
 
 export function buildSandboxCrManifest(
@@ -73,6 +75,9 @@ export function buildSandboxCrManifest(
                 })),
               }
             : {}),
+          ...(input.nodeSelector && Object.keys(input.nodeSelector).length > 0
+            ? { nodeSelector: { ...input.nodeSelector } }
+            : {}),
           securityContext: {
             runAsNonRoot: true,
             runAsUser: 1000,
@@ -81,6 +86,7 @@ export function buildSandboxCrManifest(
             fsGroupChangePolicy: "OnRootMismatch",
             seccompProfile: { type: "RuntimeDefault" },
           },
+          initContainers: [workspaceInitContainer(input.image)],
           containers: [
             {
               name: "agent",
