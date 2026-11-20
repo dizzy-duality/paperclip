@@ -18,6 +18,7 @@
  * connection. We then close the WebSocket explicitly inside the statusCallback.
  */
 
+import { randomUUID } from "node:crypto";
 import { Exec } from "@kubernetes/client-node";
 import { PassThrough } from "node:stream";
 import type { Readable, Writable } from "node:stream";
@@ -34,24 +35,166 @@ export function shQuote(segment: string): string {
   return `'${segment.replace(/'/g, "'\\''")}'`;
 }
 
-// Wrap a command so the given env vars are exported before it runs. The Kubernetes
-// exec API has no env field, so the only way to give an exec'd process additional
-// env is to run it under a shell that exports the vars and then `exec`s the real
-// command. PATH is deliberately skipped (the caller's PATH is the orchestrator's,
-// not the sandbox image's, and overriding it would break command resolution), and
-// only valid shell identifiers are exported. Returns the original command unchanged
-// when there is nothing to apply.
-export function wrapCommandWithEnv(
+/** Writable directory in the agent pod (the `/tmp` emptyDir) for staged env files. */
+export const ENV_STAGE_DIR = "/tmp/.paperclip-env";
+
+/** The two execs that run a command with a caller-supplied environment. */
+export interface StagedCommandEnv {
+  /** Writes the env file. Its stdin is {@link stageStdin}; its argv carries no values. */
+  stageCommand: string[];
+  /** `export K='v'` lines, delivered over the exec's stdin channel. */
+  stageStdin: Buffer;
+  /** Loads and deletes the env file, then `exec`s the original command. */
+  runCommand: string[];
+  /** Path of the env file in the pod. */
+  file: string;
+}
+
+
+// Give a command the caller's env without putting the values on its command line.
+//
+// The Kubernetes exec API has no env field. Exporting the values inline
+// (`sh -c "export TOKEN='…'; exec cmd"`) puts them in the exec request, where
+// the API server's audit log can record them, and in the shell's argv, where
+// any process in the pod can read them from /proc/<pid>/cmdline. Instead:
+//   1. stage: a first exec writes `export K='v'` lines, received on stdin, to a
+//      0600 file under ENV_STAGE_DIR. `head -c <bytes>` reads exactly that many
+//      bytes, so this does not depend on WebSocket EOF detection (the same
+//      technique as the fast-upload flush in plugin.ts);
+//   2. run: the command runs as `sh -c '… . /dev/fd/3 … exec "$@"' FILE cmd…`,
+//      which deletes the file, loads it, and becomes the command.
+// Only the file path and the original command reach any argv.
+//
+// If the run exec never starts (a dropped connection, a worker that died in
+// between), the file stays until the pod goes. That is bounded: a sandbox pod
+// serves one lease and its /tmp emptyDir is deleted with it, and the file holds
+// only values the agent's own processes receive anyway, readable only by that
+// same uid. Sweeping old files instead would race a slow run exec of another
+// command on the same lease.
+//
+// PATH is deliberately skipped (the caller's PATH is the orchestrator's, not the
+// sandbox image's, and overriding it would break command resolution), and only
+// valid shell identifiers are exported. Returns null when there is nothing to
+// apply, so the caller runs the command unchanged.
+export function stageCommandEnv(
   command: string[],
   env: Record<string, string> | undefined | null,
-): string[] {
+  dir: string = ENV_STAGE_DIR,
+): StagedCommandEnv | null {
   const entries = Object.entries(env && typeof env === "object" ? env : {}).filter(
     ([key, value]) =>
       typeof value === "string" && key !== "PATH" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(key),
   );
-  if (entries.length === 0) return command;
-  const exports = entries.map(([k, v]) => `export ${k}=${shQuote(v)};`).join(" ");
-  return ["/bin/sh", "-c", `${exports} exec ${command.map(shQuote).join(" ")}`];
+  if (entries.length === 0) return null;
+  const file = `${dir}/${randomUUID()}`;
+  const stageStdin = Buffer.from(
+    entries.map(([k, v]) => `export ${k}=${shQuote(v)}\n`).join(""),
+    "utf8",
+  );
+  return {
+    stageCommand: [
+      "/bin/sh",
+      "-c",
+      `umask 077 && mkdir -p ${shQuote(dir)} && head -c ${stageStdin.length} > ${shQuote(file)}`,
+    ],
+    stageStdin,
+    runCommand: [
+      "/bin/sh",
+      "-c",
+      // Open, delete, then load from the open descriptor: the file is gone
+      // before it is parsed, so even a load failure (which makes a POSIX sh
+      // exit on `.`) cannot leave the values on disk.
+      'exec 3<"$0" && rm -f "$0" && . /dev/fd/3 && exec 3<&- && exec "$@"',
+      file,
+      ...command,
+    ],
+    file,
+  };
+}
+
+/**
+ * Exit code and diagnostic for an exec status frame. A failure that carries no
+ * `ExitCode` cause did not come from the command: the API server or kubelet
+ * refused or broke the exec. Its reason and message are the only account of why,
+ * so they travel with stderr instead of being reported as a silent exit 1.
+ */
+export function execStatusOutcome(status: {
+  status?: string;
+  reason?: string;
+  message?: string;
+  details?: { causes?: { reason?: string; message?: string }[] };
+}): { exitCode: number; apiError: string | null } {
+  if (status.status === "Success") return { exitCode: 0, apiError: null };
+  const exitCodeCause = (status.details?.causes ?? []).find((c) => c.reason === "ExitCode");
+  if (exitCodeCause?.message) return { exitCode: Number(exitCodeCause.message), apiError: null };
+  const detail = [status.reason, status.message].filter(Boolean).join(": ");
+  return {
+    exitCode: 1,
+    apiError: `[kubernetes exec ${status.status ?? "Failure"}] ${detail || "no reason given"}`,
+  };
+}
+
+function withApiError(stderr: string, apiError: string | null): string {
+  if (!apiError) return stderr;
+  return stderr ? `${stderr.replace(/\n?$/, "\n")}${apiError}` : apiError;
+}
+
+/**
+ * The exec WebSocket never opened, so no command started in the pod. The
+ * Kubernetes client rejects with a WebSocket ErrorEvent rather than an Error
+ * here; its text is carried as the message instead of "[object Object]".
+ */
+export class ExecSetupError extends Error {
+  constructor(cause: unknown) {
+    super(`kubernetes exec could not be opened: ${describeExecError(cause)}`);
+    this.name = "ExecSetupError";
+  }
+}
+
+export function describeExecError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (err && typeof err === "object") {
+    const { message, error } = err as { message?: unknown; error?: unknown };
+    const inner = error instanceof Error ? error.message : null;
+    const outer = typeof message === "string" && message ? message : null;
+    if (outer && inner && inner !== outer) return `${outer} (${inner})`;
+    if (outer || inner) return (outer ?? inner) as string;
+  }
+  return String(err);
+}
+
+export type PodExecResult = {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  /** Set when the API server or kubelet failed the exec without an exit code. */
+  apiFailure?: true;
+};
+
+const SETUP_RETRY_DELAYS_MS = [500, 1500];
+
+/**
+ * Re-run an exec whose WebSocket never opened (no command started). With
+ * `retryApiFailure`, also re-run one the API server failed without an exit
+ * code: only for commands that are safe to run twice. Every attempt must still
+ * fit the caller's remaining budget.
+ */
+export async function retryExecSetup(
+  run: () => Promise<PodExecResult>,
+  opts: { retryApiFailure: boolean; remainingMs: () => number; delaysMs?: number[] },
+): Promise<PodExecResult> {
+  const delays = opts.delaysMs ?? SETUP_RETRY_DELAYS_MS;
+  for (let attempt = 0; ; attempt++) {
+    const delay = delays[attempt];
+    const canRetry = () => delay !== undefined && opts.remainingMs() > delay;
+    try {
+      const result = await run();
+      if (!(opts.retryApiFailure && result.apiFailure && canRetry())) return result;
+    } catch (err) {
+      if (!(err instanceof ExecSetupError && canRetry())) throw err;
+    }
+    await new Promise((resolve) => setTimeout(resolve, delay));
+  }
 }
 
 export async function execInPod(
@@ -79,7 +222,7 @@ export async function execInPod(
   // fails closed at the cap; regardless of the cap, the `+=` is guarded so a
   // max-string-length `RangeError` can never escape as an uncaught exception.
   maxStderrBytes?: number,
-): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+): Promise<PodExecResult> {
   const exec = new Exec(kc);
   const stdoutStream = new PassThrough();
   const stderrStream = new PassThrough();
@@ -112,11 +255,12 @@ export async function execInPod(
   let stdoutBytes = 0;
   let stderrBytes = 0;
 
-  return await new Promise<{ exitCode: number; stdout: string; stderr: string }>(
+  return await new Promise<PodExecResult>(
     (resolve, reject) => {
       let ws: WebSocketLike | null = null;
       let resolved = false;
       let pendingExitCode: number | null = null;
+      let pendingApiError: string | null = null;
       let stdoutEnded = false;
       let stderrEnded = false;
 
@@ -153,7 +297,12 @@ export async function execInPod(
         resolved = true;
         if (watchdog) clearTimeout(watchdog);
         try { ws?.close(); } catch { /* ignore */ }
-        resolve({ exitCode: pendingExitCode, stdout: stdoutData, stderr: stderrData });
+        resolve({
+          exitCode: pendingExitCode,
+          stdout: stdoutData,
+          stderr: withApiError(stderrData, pendingApiError),
+          ...(pendingApiError ? { apiFailure: true as const } : {}),
+        });
       };
 
       // Fail the whole exec closed, tearing down the WebSocket so the pod stops
@@ -225,18 +374,9 @@ export async function execInPod(
         stdinStream,
         false, // tty=false: keep stdout/stderr on separate channels
         (status) => {
-          if (status.status === "Success") {
-            pendingExitCode = 0;
-          } else {
-            const causes = status.details?.causes ?? [];
-            const exitCodeCause = causes.find(
-              (c: { reason?: string; message?: string }) =>
-                c.reason === "ExitCode",
-            );
-            pendingExitCode = exitCodeCause?.message
-              ? Number(exitCodeCause.message)
-              : 1;
-          }
+          const outcome = execStatusOutcome(status);
+          pendingExitCode = outcome.exitCode;
+          pendingApiError = outcome.apiError;
           tryFinish();
         },
       );
@@ -260,7 +400,7 @@ export async function execInPod(
           if (resolved) return;
           resolved = true;
           if (watchdog) clearTimeout(watchdog);
-          reject(err);
+          reject(new ExecSetupError(err));
         });
     },
   );
@@ -320,6 +460,7 @@ export async function execInPodStreaming(
     let ws: WebSocketLike | null = null;
     let resolved = false;
     let pendingExitCode: number | null = null;
+    let pendingApiError: string | null = null;
     let stdoutDone = false;
     let stderrEnded = false;
 
@@ -342,7 +483,7 @@ export async function execInPodStreaming(
       resolved = true;
       if (watchdog) clearTimeout(watchdog);
       try { ws?.close(); } catch { /* ignore */ }
-      resolve({ exitCode: pendingExitCode, stderr: stderrData });
+      resolve({ exitCode: pendingExitCode, stderr: withApiError(stderrData, pendingApiError) });
     };
 
     // Fail the whole exec closed, tearing down the WebSocket so the pod stops
@@ -406,15 +547,9 @@ export async function execInPodStreaming(
       stdinStream,
       false, // tty=false: keep stdout/stderr on separate channels
       (status) => {
-        if (status.status === "Success") {
-          pendingExitCode = 0;
-        } else {
-          const causes = status.details?.causes ?? [];
-          const exitCodeCause = causes.find(
-            (c: { reason?: string; message?: string }) => c.reason === "ExitCode",
-          );
-          pendingExitCode = exitCodeCause?.message ? Number(exitCodeCause.message) : 1;
-        }
+        const outcome = execStatusOutcome(status);
+        pendingExitCode = outcome.exitCode;
+        pendingApiError = outcome.apiError;
         tryFinish();
       },
     );
@@ -438,7 +573,7 @@ export async function execInPodStreaming(
         if (resolved) return;
         resolved = true;
         if (watchdog) clearTimeout(watchdog);
-        reject(err);
+        reject(new ExecSetupError(err));
       });
   });
 }

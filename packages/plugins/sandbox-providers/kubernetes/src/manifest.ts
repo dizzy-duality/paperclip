@@ -60,6 +60,12 @@ const manifest: PaperclipPluginManifestV1 = {
             items: { type: "string" },
             description: "Names of pre-created Docker image pull secrets in the tenant namespace.",
           },
+          nodeSelector: {
+            type: "object",
+            additionalProperties: { type: "string" },
+            description:
+              "Node labels agent pods must match, e.g. {\"kubernetes.io/hostname\": \"node-a\"}. Empty = any node.",
+          },
           egressAllowFqdns: {
             type: "array",
             items: { type: "string" },

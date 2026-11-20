@@ -173,6 +173,13 @@ async function ensureResourceQuota(clients: KubeClients, input: EnsureTenantInpu
   );
 }
 
+/**
+ * The tenant LimitRange's per-container minimum. Every container in an agent
+ * pod, including init containers, must request at least this, or the API server
+ * refuses the whole pod.
+ */
+export const CONTAINER_MIN_RESOURCES = { cpu: "100m", memory: "128Mi" } as const;
+
 async function ensureLimitRange(clients: KubeClients, input: EnsureTenantInput): Promise<void> {
   try {
     await clients.core.readNamespacedLimitRange({ name: LIMIT_RANGE_NAME, namespace: input.namespace });
@@ -192,7 +199,7 @@ async function ensureLimitRange(clients: KubeClients, input: EnsureTenantInput):
               {
                 type: "Container",
                 max: { cpu: "4", memory: "8Gi" },
-                min: { cpu: "100m", memory: "128Mi" },
+                min: { ...CONTAINER_MIN_RESOURCES },
                 // The k8s client-node type names this `_default` but the actual
                 // Kubernetes API field is `default`. We produce a JSON-shape
                 // manifest so the cast is safe.

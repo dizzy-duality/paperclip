@@ -15,6 +15,9 @@ export const kubernetesProviderConfigSchema = z
     imageRegistry: z.string().url().optional(),
     imageAllowList: z.array(z.string()).default([]),
     imagePullSecrets: z.array(z.string()).default([]),
+    /** Node labels agent pods must match (PodSpec.nodeSelector), e.g. to keep
+     * them in the server's datacenter. Empty = schedule anywhere. */
+    nodeSelector: z.record(z.string(), z.string()).default({}),
 
     egressAllowFqdns: z.array(z.string()).default([]),
     egressAllowCidrs: z.array(z.string().regex(cidrRegex, "Invalid CIDR")).default([]),
@@ -105,4 +108,10 @@ export interface KubernetesLeaseMetadata {
    * sync may be used when the worker advertises the verbs.
    */
   nativeFileSyncUnsupported?: boolean;
+  /**
+   * Workspace root in the pod: the native file-sync confinement root and the
+   * remote cwd the server builds the execution target from. Set at acquire and
+   * kept on resume, because the server reads it before realizeWorkspace runs.
+   */
+  remoteCwd?: string;
 }

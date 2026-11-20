@@ -21,6 +21,7 @@ import { deleteJob, findPodForJob, getJobStatus } from "./job-orchestrator.js";
 import {
   deleteSandboxCr,
   findPodForSandbox,
+  getSandboxCrStatus,
   waitForSandboxReady,
 } from "./sandbox-cr-orchestrator.js";
 
@@ -189,5 +190,53 @@ export async function destroyLeaseResources(
         name: input.secretName,
       }),
     );
+  }
+}
+
+export interface LeaseGoneInput {
+  namespace: string;
+  /** Workload resource name (Sandbox CR name or Job name) == providerLeaseId. */
+  name: string;
+  backend: "sandbox-cr" | "job";
+  podName: string | null;
+}
+
+/** Confirmation stays well inside the server's 30 s plugin RPC timeout. */
+const LEASE_GONE_TIMEOUT_MS = 20_000;
+const LEASE_GONE_POLL_MS = 1_000;
+
+async function stillExists(read: () => Promise<unknown>): Promise<boolean> {
+  try {
+    await read();
+    return true;
+  } catch (err) {
+    return !isKubeNotFoundError(err);
+  }
+}
+
+/**
+ * A delete returns as soon as Kubernetes accepts it; the pod and the agent
+ * processes in it can still be running. Poll until the workload and its pod
+ * are both gone. Only then may the server treat the lease as terminated and
+ * start a queued message. False (unconfirmed) keeps that message waiting.
+ */
+export async function waitForLeaseGone(
+  clients: KubeClients,
+  input: LeaseGoneInput,
+): Promise<boolean> {
+  const podName = input.podName ?? (input.backend === "sandbox-cr" ? input.name : null);
+  const deadline = Date.now() + LEASE_GONE_TIMEOUT_MS;
+  while (true) {
+    const workload = await stillExists(() =>
+      input.backend === "sandbox-cr"
+        ? getSandboxCrStatus(clients, input.namespace, input.name)
+        : getJobStatus(clients, input.namespace, input.name),
+    );
+    const pod = podName
+      ? await stillExists(() => clients.core.readNamespacedPod({ namespace: input.namespace, name: podName }))
+      : (await findPodForJob(clients, input.namespace, input.name)) !== null;
+    if (!workload && !pod) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, LEASE_GONE_POLL_MS));
   }
 }
