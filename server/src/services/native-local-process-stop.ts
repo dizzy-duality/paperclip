@@ -158,6 +158,29 @@ export async function nativeRunRefusedBeforeLaunch(db: Db, run: Pick<typeof hear
   return !launch;
 }
 
+/** A legacy run cancelled before any claim never had a process: every claim
+ * sets startedAt before an adapter can launch (heartbeat queue), and
+ * agentExecutionsHaveStopped already skips such runs. A scheduled run that is
+ * suppressed before dispatch (issue_disposition_repair_superseded) is this
+ * shape; demanding a stop record for it parked every later message on the
+ * task forever. Native runs keep their own startup and runner proofs. Any
+ * start time, process field, session, environment lease, launch request or
+ * identity record keeps the normal stop proofs. */
+export async function cancelledLegacyRunNeverStarted(db: Db, run: Pick<typeof heartbeatRuns.$inferSelect,
+  "id" | "companyId" | "runtimeMode" | "status" | "startedAt" | "processPid" | "processGroupId" | "nativeSessionId">): Promise<boolean> {
+  if (run.runtimeMode !== "legacy" || run.status !== "cancelled" || run.startedAt ||
+      run.processPid || run.processGroupId || run.nativeSessionId) return false;
+  const [launch] = await db.select({ id: heartbeatRunEvents.id }).from(heartbeatRunEvents).where(and(
+    eq(heartbeatRunEvents.companyId, run.companyId), eq(heartbeatRunEvents.runId, run.id),
+    inArray(heartbeatRunEvents.eventType, [PROCESS_START_REQUESTED, PROCESS_IDENTITY_RECORDED]),
+  )).limit(1);
+  if (launch) return false;
+  const [lease] = await db.select({ id: environmentLeases.id }).from(environmentLeases).where(and(
+    eq(environmentLeases.companyId, run.companyId), eq(environmentLeases.heartbeatRunId, run.id),
+  )).limit(1);
+  return !lease;
+}
+
 /** Pre-receipt native runs can retain an exact suspended session after their
  * mutable process fields were cleared. This is admission evidence for a new
  * user turn only, never permission to replay the old run or infer its outcomes.
