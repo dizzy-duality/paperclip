@@ -120,6 +120,31 @@ const support = externalUrl ? { supported: true } : await getEmbeddedPostgresTes
     expect(retryBlocked).toEqual([retry]);
   });
 
+  it.each([
+    { shape: "was cancelled before any claim", started: false, launched: false, blocked: [] },
+    { shape: "was claimed before it was cancelled", started: true, launched: false, blocked: ["process_identity_missing"] },
+    { shape: "requested a launch before it was cancelled", started: false, launched: true, blocked: ["process_identity_missing"] },
+  ])("admits a new message after a legacy run that $shape only when nothing could have run", async ({ started, launched, blocked: expected }) => {
+    // LMT-12328/LMT-12294: a scheduled disposition repair was suppressed
+    // before dispatch. The watchdog's legacy hold then parked every later
+    // message on a stop record that a run without a process can never get.
+    const f = await seed();
+    await db.update(agents).set({ adapterType: "claude_local" }).where(eq(agents.id, f.agentId));
+    await db.update(issues).set({ status: "todo" }).where(eq(issues.id, f.issueId));
+    await db.delete(nativeRunFinalizations).where(eq(nativeRunFinalizations.runId, f.sourceRunId));
+    await db.update(heartbeatRuns).set({ runtimeMode: "legacy", status: "cancelled", processPid: null,
+      nativeIssueId: null, issueId: f.issueId, errorCode: "issue_disposition_repair_superseded",
+      startedAt: started ? new Date("2026-09-11T09:59:00Z") : null }).where(eq(heartbeatRuns.id, f.sourceRunId));
+    await db.update(issueRecoveryActions).set({ cause: "legacy_execution_requires_reconciliation" })
+      .where(eq(issueRecoveryActions.fingerprint, f.sourceRunId));
+    if (launched) await db.insert(heartbeatRunEvents).values({ companyId: f.companyId, runId: f.sourceRunId, agentId: f.agentId,
+      seq: 1, eventType: "native.process_start_requested", stream: "system", level: "info", message: "launch requested",
+      payload: { hostname: os.hostname() } });
+    const { result, blocked } = await readAdmission(f, false);
+    expect(blocked).toEqual(expected);
+    if (expected.length) expect(result).toBeNull();
+    else expect(result).toMatchObject({ previousRunId: f.sourceRunId, commentId: f.commentId });
+  });
   it("keeps admission and the complete locked session profile while omitting prompt data", async () => {
     const f = await seed();
     const payload = randomBytes(128 * 1024).toString("base64");
