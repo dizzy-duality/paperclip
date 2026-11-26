@@ -45,7 +45,10 @@ import { copyBackCodexAuth } from "./codex-auth-copyback.js";
 import {
   CODEX_AUTH_JSON_ENV_KEY,
   materializeCodexAuthJsonSecret,
+  redactCodexAccountHandleInError,
   stripCodexAuthJsonFromEnv,
+  wrapOnLogRedactingCodexAccountHandle,
+  wrapOnMetaRedactingCodexAccountHandle,
 } from "./codex-auth-json.js";
 import {
   buildCodexHomeRefreshProvision,
@@ -403,6 +406,7 @@ export function createCodexAcpExecutor(options: CodexAcpExecutorOptions = {}): C
         ? firstNonEmptyString(rawEnv[CODEX_AUTH_JSON_ENV_KEY])
         : undefined;
     const sanitizedEnv: Record<string, unknown> = { ...stripCodexAuthJsonFromEnv(rawEnv) };
+    let materializedAccountHandle: string | null = null;
     if (configuredAuthJson) {
       const materialized = await materializeCodexAuthJsonSecret({
         raw: configuredAuthJson,
@@ -410,13 +414,20 @@ export function createCodexAcpExecutor(options: CodexAcpExecutorOptions = {}): C
         env: process.env,
         log: (line) => ctx.onLog("stdout", `${line}\n`),
       });
+      materializedAccountHandle = materialized.accountHandle;
       sanitizedEnv.CODEX_HOME = materialized.accountHomeDir;
     }
-    const result = await currentExecutor({
-      ...ctx,
-      config: buildCodexAcpConfig({ ...rawConfig, env: sanitizedEnv }),
-    });
-    return withCodexAuthRefreshFailureClassification(result);
+    try {
+      const result = await currentExecutor({
+        ...ctx,
+        onLog: wrapOnLogRedactingCodexAccountHandle(ctx.onLog, materializedAccountHandle),
+        onMeta: wrapOnMetaRedactingCodexAccountHandle(ctx.onMeta, materializedAccountHandle),
+        config: buildCodexAcpConfig({ ...rawConfig, env: sanitizedEnv }),
+      });
+      return withCodexAuthRefreshFailureClassification(result);
+    } catch (error) {
+      throw redactCodexAccountHandleInError(error, materializedAccountHandle);
+    }
   };
 }
 
@@ -626,17 +637,17 @@ export async function testCodexAcpEnvironment(
   const envConfig = parseObject(config.env);
   if (!targetIsRemote) {
     const configApiKey = isNonEmpty(envConfig.OPENAI_API_KEY) ? envConfig.OPENAI_API_KEY : null;
+    const configuredAuthJson = !config.managedAiConnection && !configApiKey && isNonEmpty(envConfig[CODEX_AUTH_JSON_ENV_KEY])
+      ? envConfig[CODEX_AUTH_JSON_ENV_KEY]
+      : null;
     const hostApiKey =
-      Object.prototype.hasOwnProperty.call(envConfig, "OPENAI_API_KEY")
+      configuredAuthJson || Object.prototype.hasOwnProperty.call(envConfig, "OPENAI_API_KEY")
         ? null
         : isNonEmpty(process.env.OPENAI_API_KEY)
         ? process.env.OPENAI_API_KEY
         : null;
     const configuredApiKey = configApiKey ?? hostApiKey;
     const configuredCodexHome = isNonEmpty(envConfig.CODEX_HOME) ? envConfig.CODEX_HOME : null;
-    const configuredAuthJson = !config.managedAiConnection && isNonEmpty(envConfig[CODEX_AUTH_JSON_ENV_KEY])
-      ? envConfig[CODEX_AUTH_JSON_ENV_KEY]
-      : null;
     const credentialReadiness = await evaluateCodexCredentialReadiness({
       env: process.env,
       companyId: ctx.companyId,

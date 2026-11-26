@@ -73,7 +73,7 @@ describe.skipIf(process.platform === "win32")("local browser subscription login"
       '[ "$1 $2" = "login --device-auth" ] || exit 11',
       '[ "$HOME" = "$CLAUDE_CONFIG_DIR" ] && [ "$HOME" != "$CODEX_HOME" ] && [ "$CODEX_HOME" = "$PAPERCLIP_TEST_LOGIN_CODEX_HOME" ] || exit 12',
       '[ "$PWD" = "$PAPERCLIP_TEST_LOGIN_CWD" ] || exit 13',
-      '[ -z "$OPENAI_API_KEY$CODEX_API_KEY$ANTHROPIC_API_KEY$ANTHROPIC_AUTH_TOKEN$CLAUDE_CODE_OAUTH_TOKEN" ] || exit 14',
+      '[ -z "$OPENAI_API_KEY$CODEX_API_KEY$CODEX_AUTH_JSON$ANTHROPIC_API_KEY$ANTHROPIC_AUTH_TOKEN$CLAUDE_CODE_OAUTH_TOKEN" ] || exit 14',
       'printf "1. Open this link in your browser and sign in to your account\\nhttps://auth.openai.com/codex/device\\n2. Enter this one-time code (expires in 15 minutes)\\nABCD-EFGHJ\\n"',
     ].join("\n"));
     if (legacy) vi.mocked(resolveCodexCommand).mockImplementation(() => { throw new Error("native artifact is unavailable"); });
@@ -83,7 +83,7 @@ describe.skipIf(process.platform === "win32")("local browser subscription login"
     for (const key of ["HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"]) vi.stubEnv(key, ambientHome);
     vi.stubEnv("PAPERCLIP_TEST_LOGIN_CODEX_HOME", home);
     vi.stubEnv("PAPERCLIP_TEST_LOGIN_CWD", process.cwd());
-    for (const key of ["OPENAI_API_KEY", "CODEX_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"])
+    for (const key of ["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_AUTH_JSON", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"])
       vi.stubEnv(key, "unrelated-host-value");
     const login = startLocalBrowserLogin("openai", home);
     await vi.waitFor(() => expect(login.outcome).toBeDefined(), { timeout: 5000 });

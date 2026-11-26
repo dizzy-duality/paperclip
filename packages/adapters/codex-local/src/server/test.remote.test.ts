@@ -663,4 +663,31 @@ describe("codex remote environment diagnostics", () => {
     expect(result.checks.some((check) => check.code === "codex_auth_json_invalid")).toBe(true);
     expect(prepareAdapterExecutionTargetRuntime).not.toHaveBeenCalled();
   });
+
+  it("fails closed on the remote probe when CODEX_AUTH_JSON has an implausibly future last_refresh", async () => {
+    const futureSecret = subscriptionAuth(
+      "acct-future-probe",
+      "future-probe",
+      new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    );
+
+    const result = await testEnvironment({
+      companyId: "company-org-b",
+      adapterType: "codex_local",
+      config: {
+        engine: "cli",
+        command: "codex",
+        env: {
+          OPENAI_API_KEY: "",
+          CODEX_AUTH_JSON: futureSecret,
+        },
+      },
+      executionTarget: sandboxTarget(),
+      environmentName: "QA Daytona",
+    });
+
+    expect(result.status).toBe("fail");
+    expect(result.checks.some((check) => check.code === "codex_auth_json_invalid")).toBe(true);
+    expect(prepareAdapterExecutionTargetRuntime).not.toHaveBeenCalled();
+  });
 });

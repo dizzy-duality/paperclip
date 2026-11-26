@@ -5,10 +5,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CODEX_AUTH_JSON_ENV_KEY,
   InvalidCodexAuthJsonError,
+  REDACTED_CODEX_ACCOUNT_HANDLE,
   materializeCodexAuthJsonSecret,
   parseCodexAuthJsonEnv,
   stripCodexAuthJsonFromEnv,
 } from "./codex-auth-json.js";
+import { createCodexAcpExecutor, testCodexAcpEnvironment } from "./acp.js";
 import { copyBackCodexAuth } from "./codex-auth-copyback.js";
 import {
   evaluateCodexCredentialReadiness,
@@ -472,9 +474,96 @@ process.stdin.on("end", () => {
     expect(captured.codexHome).toContain(path.join("companies", "org-b", "codex-auth-cache", "acct-colleague-y"));
     expect(loggedMetaEnv).toBeDefined();
     expect(loggedMetaEnv?.CODEX_AUTH_JSON).toBeUndefined();
+    expect(loggedMetaEnv?.CODEX_HOME).toContain(REDACTED_CODEX_ACCOUNT_HANDLE);
+    expect(JSON.stringify(loggedMetaEnv)).not.toContain("acct-colleague-y");
     expect(logs.join("")).not.toContain("refresh-colleague-y-secret");
+    expect(logs.join("")).not.toContain("acct-colleague-y");
     // Host login for User X remained completely untouched.
     expect(await readFile(path.join(sharedHome, "auth.json"), "utf8")).toContain("host-user-x");
+  });
+
+  it("fails closed when CODEX_AUTH_JSON has an implausibly future last_refresh (empty slot never launches)", async () => {
+    const root = await makeScratchDir("paperclip-codex-exec-future-refresh-");
+    const sharedHome = path.join(root, "shared-host");
+    const workspaceDir = path.join(root, "workspace");
+    await mkdir(sharedHome, { recursive: true });
+    await mkdir(workspaceDir, { recursive: true });
+    await writeFile(
+      path.join(sharedHome, "auth.json"),
+      subscriptionAuthJson({ accountId: "acct-user-x", lastRefresh: "2026-10-01T10:00:00Z", marker: "host-user-x" }),
+    );
+
+    vi.stubEnv("PAPERCLIP_HOME", root);
+    vi.stubEnv("PAPERCLIP_INSTANCE_ID", "default");
+    vi.stubEnv("CODEX_HOME", sharedHome);
+
+    const futureLastRefresh = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const futureSecret = subscriptionAuthJson({
+      accountId: "acct-future-skew",
+      lastRefresh: futureLastRefresh,
+      marker: "future-token",
+    });
+
+    const readiness = await evaluateCodexCredentialReadiness({
+      env: process.env,
+      companyId: "org-b",
+      configuredCodexHome: null,
+      configuredApiKey: null,
+      configuredAuthJson: futureSecret,
+    });
+    expect(readiness.ready).toBe(false);
+    expect(readiness.invalidReason).toBe("invalid_codex_auth_json");
+
+    await expect(
+      execute({
+        runId: "run-future-skew",
+        agent: {
+          id: "agent-org-b",
+          companyId: "org-b",
+          name: "OrgB-Codex",
+          adapterType: "codex_local",
+          adapterConfig: { engine: "cli" },
+        },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+        config: {
+          engine: "cli",
+          command: "codex",
+          cwd: workspaceDir,
+          env: {
+            OPENAI_API_KEY: "",
+            CODEX_AUTH_JSON: futureSecret,
+          },
+        },
+        context: {},
+        onLog: async () => {},
+      }),
+    ).rejects.toBeInstanceOf(InvalidCodexAuthJsonError);
+  });
+
+  it("does not leak accountHandle when materialization hits a filesystem error", async () => {
+    const root = await makeScratchDir("paperclip-codex-fs-err-");
+    // Point PAPERCLIP_HOME at a regular file so mkdir fails with ENOTDIR/EEXIST.
+    const blockingFile = path.join(root, "not-a-dir");
+    await writeFile(blockingFile, "block", "utf8");
+    const env: NodeJS.ProcessEnv = {
+      PAPERCLIP_HOME: blockingFile,
+      PAPERCLIP_INSTANCE_ID: "default",
+    };
+    const secret = subscriptionAuthJson({
+      accountId: "acct-sensitive-handle",
+      lastRefresh: "2026-10-01T10:00:00Z",
+      marker: "tok",
+    });
+
+    let caught: Error | null = null;
+    try {
+      await materializeCodexAuthJsonSecret({ raw: secret, companyId: "org-b", env });
+    } catch (err) {
+      caught = err as Error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught?.message).not.toContain("acct-sensitive-handle");
+    expect(caught?.message).not.toContain("refresh-tok");
   });
 
   it("fails closed when CODEX_AUTH_JSON is malformed instead of falling back to shared host user X", async () => {
@@ -516,5 +605,261 @@ process.stdin.on("end", () => {
         onLog: async () => {},
       }),
     ).rejects.toBeInstanceOf(InvalidCodexAuthJsonError);
+  });
+});
+
+describe("ACP lane CODEX_AUTH_JSON wiring", () => {
+  const scratchDirs: string[] = [];
+
+  async function makeScratchDir(prefix: string): Promise<string> {
+    const dir = await mkdtemp(path.join(os.tmpdir(), prefix));
+    scratchDirs.push(dir);
+    return dir;
+  }
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    while (scratchDirs.length > 0) {
+      const dir = scratchDirs.pop();
+      if (dir) await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  function makeStubAcpRuntime() {
+    const ensureSession = vi.fn(async (input: { sessionKey: string; cwd?: string }) => ({
+      sessionKey: input.sessionKey,
+      backend: "acpx",
+      runtimeSessionName: "runtime-1",
+      cwd: input.cwd,
+      acpxRecordId: "record-1",
+      backendSessionId: "acp-1",
+      agentSessionId: "agent-1",
+    }));
+    const createRuntime = () => ({
+      ensureSession,
+      startTurn: (input: { requestId: string }) => ({
+        requestId: input.requestId,
+        events: {
+          [Symbol.asyncIterator]: async function* () {
+            yield { type: "text_delta", text: "ok", stream: "output", tag: "agent_message_chunk" };
+          },
+        },
+        result: Promise.resolve({ status: "completed", stopReason: "end_turn" }),
+        cancel: async () => {},
+        closeStream: async () => {},
+      }),
+      getCapabilities: () => ({ controls: [] }),
+      getStatus: async () => ({}),
+      setConfigOption: async () => {},
+      setMode: async () => {},
+      close: async () => {},
+    }) as never;
+    return { createRuntime, ensureSession };
+  }
+
+  it("materializes CODEX_AUTH_JSON, overrides CODEX_HOME, strips CODEX_AUTH_JSON, and redacts accountHandle from logs/meta", async () => {
+    const root = await makeScratchDir("paperclip-codex-acp-secret-");
+    const sharedHome = path.join(root, "shared-host");
+    const workspaceDir = path.join(root, "workspace");
+    await mkdir(sharedHome, { recursive: true });
+    await mkdir(workspaceDir, { recursive: true });
+    await writeFile(
+      path.join(sharedHome, "auth.json"),
+      subscriptionAuthJson({ accountId: "acct-host-x", lastRefresh: "2026-10-01T10:00:00Z", marker: "host-x" }),
+    );
+    vi.stubEnv("PAPERCLIP_HOME", root);
+    vi.stubEnv("PAPERCLIP_INSTANCE_ID", "default");
+    vi.stubEnv("CODEX_HOME", sharedHome);
+
+    const colleagueY = subscriptionAuthJson({
+      accountId: "acct-acp-colleague-y",
+      lastRefresh: "2026-10-01T11:00:00Z",
+      marker: "acp-colleague-y",
+    });
+
+    const { createRuntime, ensureSession } = makeStubAcpRuntime();
+    const acpExec = createCodexAcpExecutor({ createRuntime });
+    const logs: string[] = [];
+    let metaEnv: Record<string, string> | undefined;
+    const result = await acpExec({
+      runId: "run-acp-secret",
+      agent: {
+        id: "agent-acp-b",
+        companyId: "org-b",
+        name: "OrgB-ACP",
+        adapterType: "codex_local",
+        adapterConfig: { engine: "acp" },
+      },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: {
+        engine: "acp",
+        cwd: workspaceDir,
+        agentCommand: "node ./fake-acp.js",
+        stateDir: path.join(root, "state"),
+        env: {
+          OPENAI_API_KEY: "",
+          CODEX_AUTH_JSON: Buffer.from(colleagueY, "utf8").toString("base64"),
+        },
+      },
+      context: {},
+      onLog: async (_stream, chunk) => {
+        logs.push(chunk);
+      },
+      onMeta: async (meta) => {
+        metaEnv = meta.env;
+      },
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(ensureSession).toHaveBeenCalledTimes(1);
+    const materializedAuthPath = path.join(
+      root,
+      "instances",
+      "default",
+      "companies",
+      "org-b",
+      "codex-auth-cache",
+      "acct-acp-colleague-y",
+      "auth.json",
+    );
+    expect(await readFile(materializedAuthPath, "utf8")).toContain("acp-colleague-y");
+    expect(metaEnv?.CODEX_AUTH_JSON).toBeUndefined();
+    expect(metaEnv?.CODEX_HOME).toContain(path.join("companies", "org-b", "codex-auth-cache", REDACTED_CODEX_ACCOUNT_HANDLE));
+    expect(logs.join("")).not.toContain("acct-acp-colleague-y");
+    expect(JSON.stringify(metaEnv ?? {})).not.toContain("acct-acp-colleague-y");
+  });
+
+  it("ignores CODEX_AUTH_JSON on ACP when managedAiConnection or OPENAI_API_KEY is configured, and strips it", async () => {
+    const root = await makeScratchDir("paperclip-codex-acp-precedence-");
+    const workspaceDir = path.join(root, "workspace");
+    const managedHome = path.join(root, "managed-provider");
+    await mkdir(workspaceDir, { recursive: true });
+    await mkdir(managedHome, { recursive: true });
+    vi.stubEnv("PAPERCLIP_HOME", root);
+    vi.stubEnv("PAPERCLIP_INSTANCE_ID", "default");
+    vi.stubEnv("CODEX_HOME", managedHome);
+
+    // 1. managedAiConnection ignores even an invalid CODEX_AUTH_JSON and strips it.
+    const first = makeStubAcpRuntime();
+    const acpExec1 = createCodexAcpExecutor({ createRuntime: first.createRuntime });
+    let meta1: Record<string, string> | undefined;
+    const res1 = await acpExec1({
+      runId: "run-acp-managed",
+      agent: {
+        id: "agent-acp-1",
+        companyId: "org-b",
+        name: "OrgB-ACP",
+        adapterType: "codex_local",
+        adapterConfig: { engine: "acp" },
+      },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: {
+        engine: "acp",
+        cwd: workspaceDir,
+        agentCommand: "node ./fake-acp.js",
+        stateDir: path.join(root, "state-1"),
+        managedAiConnection: { provider: "openai", method: "subscription" },
+        env: {
+          CODEX_HOME: managedHome,
+          CODEX_AUTH_JSON: "invalid-but-ignored-under-managed",
+        },
+      },
+      context: {},
+      onLog: async () => {},
+      onMeta: async (meta) => {
+        meta1 = meta.env;
+      },
+    });
+    expect(res1.exitCode).toBe(0);
+    expect(meta1?.CODEX_AUTH_JSON).toBeUndefined();
+    expect(meta1?.CODEX_HOME).toBe(managedHome);
+
+    // 2. Explicit OPENAI_API_KEY takes precedence over CODEX_AUTH_JSON and strips it.
+    const second = makeStubAcpRuntime();
+    const acpExec2 = createCodexAcpExecutor({ createRuntime: second.createRuntime });
+    let meta2: Record<string, string> | undefined;
+    const res2 = await acpExec2({
+      runId: "run-acp-apikey",
+      agent: {
+        id: "agent-acp-2",
+        companyId: "org-b",
+        name: "OrgB-ACP",
+        adapterType: "codex_local",
+        adapterConfig: { engine: "acp" },
+      },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: {
+        engine: "acp",
+        cwd: workspaceDir,
+        agentCommand: "node ./fake-acp.js",
+        stateDir: path.join(root, "state-2"),
+        env: {
+          OPENAI_API_KEY: "sk-explicit-key",
+          CODEX_AUTH_JSON: "invalid-but-ignored-under-api-key",
+        },
+      },
+      context: {},
+      onLog: async () => {},
+      onMeta: async (meta) => {
+        meta2 = meta.env;
+      },
+    });
+    expect(res2.exitCode).toBe(0);
+    expect(meta2?.CODEX_AUTH_JSON).toBeUndefined();
+    expect(meta2?.OPENAI_API_KEY).toBe("***REDACTED***");
+  });
+
+  it("fails closed on ACP when CODEX_AUTH_JSON has a future last_refresh, and testCodexAcpEnvironment does not let ambient host OPENAI_API_KEY mask invalid CODEX_AUTH_JSON", async () => {
+    const root = await makeScratchDir("paperclip-codex-acp-future-");
+    const workspaceDir = path.join(root, "workspace");
+    await mkdir(workspaceDir, { recursive: true });
+    vi.stubEnv("PAPERCLIP_HOME", root);
+    vi.stubEnv("PAPERCLIP_INSTANCE_ID", "default");
+    vi.stubEnv("CODEX_HOME", path.join(root, "shared"));
+    vi.stubEnv("OPENAI_API_KEY", "sk-ambient-host-key");
+
+    const futureSecret = subscriptionAuthJson({
+      accountId: "acct-acp-future",
+      lastRefresh: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      marker: "future",
+    });
+
+    const { createRuntime, ensureSession } = makeStubAcpRuntime();
+    const acpExec = createCodexAcpExecutor({ createRuntime });
+    await expect(
+      acpExec({
+        runId: "run-acp-future",
+        agent: {
+          id: "agent-acp-f",
+          companyId: "org-b",
+          name: "OrgB-ACP",
+          adapterType: "codex_local",
+          adapterConfig: { engine: "acp" },
+        },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+        config: {
+          engine: "acp",
+          cwd: workspaceDir,
+          agentCommand: "node ./fake-acp.js",
+          env: { CODEX_AUTH_JSON: futureSecret },
+        },
+        context: {},
+        onLog: async () => {},
+      }),
+    ).rejects.toBeInstanceOf(InvalidCodexAuthJsonError);
+    expect(ensureSession).not.toHaveBeenCalled();
+
+    const envTest = await testCodexAcpEnvironment({
+      companyId: "org-b",
+      adapterType: "codex_local",
+      config: {
+        engine: "acp",
+        cwd: workspaceDir,
+        agentCommand: "node",
+        env: { CODEX_AUTH_JSON: futureSecret },
+      },
+    });
+    expect(envTest.status).toBe("fail");
+    expect(envTest.checks.some((c) => c.code === "codex_auth_json_invalid")).toBe(true);
   });
 });

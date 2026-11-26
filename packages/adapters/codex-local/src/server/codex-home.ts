@@ -922,10 +922,13 @@ export async function resolveCodexVendTargetAuthPath(
   const activeHome = configured ?? resolveManagedCodexHomeDir(env, input.companyId);
   const activeAuthPath = path.join(activeHome, "auth.json");
   const existing = await fs.lstat(activeAuthPath).catch(() => null);
-  if (existing?.isFile()) {
-    return activeAuthPath;
-  }
-  return path.join(resolveSharedCodexHomeDir(env), "auth.json");
+  const candidate = existing?.isFile()
+    ? activeAuthPath
+    : path.join(resolveSharedCodexHomeDir(env), "auth.json");
+  // Resolve symlinks on existing targets so vend and copy-back always acquire
+  // `withDirectoryMergeLock` under the same canonical directory key (e.g. when
+  // the shared Codex home directory itself is a symlink).
+  return fs.realpath(candidate).catch(() => candidate);
 }
 
 export interface ReconcileManagedCodexHomeInput {

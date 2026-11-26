@@ -13,7 +13,10 @@ import { copyBackCodexAuth } from "./codex-auth-copyback.js";
 import {
   CODEX_AUTH_JSON_ENV_KEY,
   materializeCodexAuthJsonSecret,
+  redactCodexAccountHandleInError,
   stripCodexAuthJsonFromEnv,
+  wrapOnLogRedactingCodexAccountHandle,
+  wrapOnMetaRedactingCodexAccountHandle,
 } from "./codex-auth-json.js";
 import {
   ensureCodexAuthCacheEntryDir,
@@ -609,7 +612,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     return executeCodexAcp(ctx);
   }
 
-  const { runId, agent, runtime, config, context, onLog, onMeta, onEvent, onSpawn, authToken } = ctx;
+  const { runId, agent, runtime, config, context, onLog: rawOnLog, onMeta: rawOnMeta, onEvent, onSpawn, authToken } = ctx;
+  let onLog = rawOnLog;
+  let onMeta = rawOnMeta;
+  let materializedCodexAccountHandle: string | null = null;
 
   const promptTemplate = asString(
     config.promptTemplate,
@@ -682,8 +688,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       env: process.env,
       log: (line) => onLog("stdout", `${line}\n`),
     });
+    materializedCodexAccountHandle = materialized.accountHandle;
+    onLog = wrapOnLogRedactingCodexAccountHandle(rawOnLog, materializedCodexAccountHandle);
+    onMeta = wrapOnMetaRedactingCodexAccountHandle(rawOnMeta, materializedCodexAccountHandle);
     configuredCodexHome = materialized.accountHomeDir;
   }
+  try {
   const skillSourceHome = configuredCodexHome;
   const connectorSkillDigest = typeof config.paperclipConnectorSkillDigest === "string"
     && /^[a-f0-9]{64}$/.test(config.paperclipConnectorSkillDigest) ? config.paperclipConnectorSkillDigest : null;
@@ -1772,5 +1782,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     // written at prepare time.
     await observabilityProfile?.cleanup();
     await preparedRuntimeConfig.cleanup();
+  }
+  } catch (error) {
+    throw redactCodexAccountHandleInError(error, materializedCodexAccountHandle);
   }
 }

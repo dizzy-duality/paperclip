@@ -1,4 +1,6 @@
+import { readFile } from "node:fs/promises";
 import path from "node:path";
+import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import { toAccountHandle } from "@paperclipai/shared";
 import {
   ensureCodexAuthCacheEntryDir,
@@ -15,9 +17,16 @@ import {
 
 export const CODEX_AUTH_JSON_ENV_KEY = "CODEX_AUTH_JSON";
 
+// Must match MAX_FUTURE_LAST_REFRESH_SKEW_MS in codex-auth-merge-decision.cjs
+// so pre-dispatch readiness and execute-time materialization enforce the exact
+// same clock-skew ceiling.
+export const MAX_FUTURE_LAST_REFRESH_SKEW_MS = 5 * 60 * 1000;
+
 // Base64 expands bytes by 4/3 (plus optional whitespace/newlines). Reject
 // oversized raw env payloads before decoding to keep memory bounded.
 const MAX_ENCODED_AUTH_JSON_CHARS = Math.ceil((MAX_AUTH_JSON_BYTES * 4) / 3) + 4096;
+
+export const REDACTED_CODEX_ACCOUNT_HANDLE = "<redacted-account>";
 
 export class InvalidCodexAuthJsonError extends Error {
   constructor(
@@ -34,14 +43,34 @@ export interface ParsedCodexAuthJson {
   accountHandle: string;
 }
 
+export interface ParseCodexAuthJsonOptions {
+  /** Clock reference for future `last_refresh` skew validation. Defaults to `Date.now()`. */
+  nowMs?: number;
+}
+
+function readAuthLastRefreshMs(bytes: Buffer): number | null {
+  try {
+    const parsed = JSON.parse(bytes.toString("utf8")) as Record<string, unknown>;
+    if (typeof parsed.last_refresh !== "string") return null;
+    const ms = Date.parse(parsed.last_refresh);
+    return Number.isFinite(ms) ? ms : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Decodes and validates a `CODEX_AUTH_JSON` environment value (either raw JSON
  * or base64-encoded JSON) representing a ChatGPT subscription `auth.json`.
  *
- * Fails closed on empty, oversized, malformed, API-key, or missing-identity
- * payloads. Error messages never include raw token bytes or `account_id`.
+ * Fails closed on empty, oversized, malformed, API-key, missing-identity, or
+ * implausibly future-dated `last_refresh` payloads. Error messages never
+ * include raw token bytes or `account_id`.
  */
-export function parseCodexAuthJsonEnv(raw: string): ParsedCodexAuthJson {
+export function parseCodexAuthJsonEnv(
+  raw: string,
+  options: ParseCodexAuthJsonOptions = {},
+): ParsedCodexAuthJson {
   const trimmed = typeof raw === "string" ? raw.trim() : "";
   if (trimmed.length === 0) {
     throw new InvalidCodexAuthJsonError("CODEX_AUTH_JSON is empty.");
@@ -88,6 +117,14 @@ export function parseCodexAuthJsonEnv(raw: string): ParsedCodexAuthJson {
     );
   }
 
+  const nowMs = options.nowMs ?? Date.now();
+  const lastRefreshMs = readAuthLastRefreshMs(bytes);
+  if (lastRefreshMs !== null && lastRefreshMs - nowMs > MAX_FUTURE_LAST_REFRESH_SKEW_MS) {
+    throw new InvalidCodexAuthJsonError(
+      "CODEX_AUTH_JSON last_refresh is implausibly far in the future (exceeds the 5-minute clock skew allowance).",
+    );
+  }
+
   return { bytes, accountId, accountHandle };
 }
 
@@ -96,6 +133,7 @@ export interface MaterializeCodexAuthJsonInput {
   companyId: string;
   env?: NodeJS.ProcessEnv;
   log?: (line: string) => void | Promise<void>;
+  nowMs?: number;
 }
 
 export interface MaterializeCodexAuthJsonResult {
@@ -115,26 +153,52 @@ const noopLog = () => undefined;
  * tokens, this never blindly overwrites an existing slot: it seeds an absent
  * slot, adopts a strictly-newer rotated secret, and preserves any equal or
  * newer rotated token already persisted in the slot from prior runs.
+ *
+ * Fails closed: after the write/keep decision, verifies that the slot actually
+ * contains a usable subscription credential for the parsed `account_id`, and
+ * never leaks `accountHandle` or token bytes in thrown errors.
  */
 export async function materializeCodexAuthJsonSecret(
   input: MaterializeCodexAuthJsonInput,
 ): Promise<MaterializeCodexAuthJsonResult> {
   const env = input.env ?? process.env;
-  const parsed = parseCodexAuthJsonEnv(input.raw);
-  const authPath = await ensureCodexAuthCacheEntryDir(env, parsed.accountHandle, input.companyId);
-  const outcome = await writeCredentialSeedOrNewer({
-    sourceBytes: parsed.bytes,
-    destinationPath: authPath,
-    seedIfDestAbsent: true,
-    log: input.log ?? noopLog,
-    writtenLine:
-      "[paperclip] Materialized CODEX_AUTH_JSON into company-scoped Codex account home (seed or strictly-newer update).",
-    keptLine:
-      "[paperclip] Kept existing company-scoped Codex account home (already holds an equal or newer rotated credential for this account).",
-    tempPrefix: "auth.json.secret-seed",
-    errorLabel: "codex auth json secret",
-    env,
-  });
+  const parsed = parseCodexAuthJsonEnv(input.raw, { nowMs: input.nowMs });
+  let authPath: string;
+  let outcome: WriteCredentialSeedOrNewerOutcome;
+  try {
+    authPath = await ensureCodexAuthCacheEntryDir(env, parsed.accountHandle, input.companyId);
+    outcome = await writeCredentialSeedOrNewer({
+      sourceBytes: parsed.bytes,
+      destinationPath: authPath,
+      seedIfDestAbsent: true,
+      log: input.log ?? noopLog,
+      writtenLine:
+        "[paperclip] Materialized CODEX_AUTH_JSON into company-scoped Codex account home (seed or strictly-newer update).",
+      keptLine:
+        "[paperclip] Kept existing company-scoped Codex account home (already holds an equal or newer rotated credential for this account).",
+      tempPrefix: "auth.json.secret-seed",
+      errorLabel: "codex auth json secret",
+      env,
+    });
+  } catch (error) {
+    if (error instanceof InvalidCodexAuthJsonError) {
+      throw error;
+    }
+    const code = (error as NodeJS.ErrnoException | null)?.code ?? "unknown";
+    throw new Error(`Failed to materialize CODEX_AUTH_JSON into company-scoped Codex account home (${code}).`);
+  }
+
+  // Defense in depth: never proceed if the slot is still absent, unreadable,
+  // or holds a different/unusable credential (e.g. if the merge predicate
+  // refused the seed).
+  const slotBytes = await readFile(authPath).catch(() => null);
+  const slotAccountId = slotBytes ? readSubscriptionAccountId(slotBytes) : null;
+  if (slotAccountId !== parsed.accountId) {
+    throw new InvalidCodexAuthJsonError(
+      "CODEX_AUTH_JSON could not be materialized into a usable company-scoped credential slot.",
+    );
+  }
+
   return {
     accountHomeDir: path.dirname(authPath),
     authPath,
@@ -157,4 +221,71 @@ export function stripCodexAuthJsonFromEnv<T extends Record<string, unknown>>(
   const copy = { ...env };
   delete copy[CODEX_AUTH_JSON_ENV_KEY];
   return copy;
+}
+
+/** Redacts an account handle (embedded in the cache slot directory path) from text. */
+export function redactCodexAccountHandleInText(
+  text: string,
+  accountHandle: string | null | undefined,
+): string {
+  if (!accountHandle || !text.includes(accountHandle)) {
+    return text;
+  }
+  return text.split(accountHandle).join(REDACTED_CODEX_ACCOUNT_HANDLE);
+}
+
+/** Wraps `onLog` so the `CODEX_AUTH_JSON` account handle never reaches run logs. */
+export function wrapOnLogRedactingCodexAccountHandle(
+  onLog: AdapterExecutionContext["onLog"],
+  accountHandle: string | null | undefined,
+): AdapterExecutionContext["onLog"] {
+  if (!accountHandle) return onLog;
+  return (stream, chunk) => onLog(stream, redactCodexAccountHandleInText(chunk, accountHandle));
+}
+
+/** Wraps `onMeta` so the `CODEX_AUTH_JSON` account handle never reaches invocation metadata. */
+export function wrapOnMetaRedactingCodexAccountHandle(
+  onMeta: AdapterExecutionContext["onMeta"],
+  accountHandle: string | null | undefined,
+): AdapterExecutionContext["onMeta"] {
+  if (!onMeta || !accountHandle) return onMeta;
+  return (meta) =>
+    onMeta({
+      ...meta,
+      ...(meta.env
+        ? {
+            env: Object.fromEntries(
+              Object.entries(meta.env).map(([k, v]) => [
+                k,
+                typeof v === "string" ? redactCodexAccountHandleInText(v, accountHandle) : v,
+              ]),
+            ),
+          }
+        : {}),
+      ...(meta.commandNotes
+        ? {
+            commandNotes: meta.commandNotes.map((note) =>
+              redactCodexAccountHandleInText(note, accountHandle),
+            ),
+          }
+        : {}),
+      ...(meta.commandArgs
+        ? {
+            commandArgs: meta.commandArgs.map((arg) =>
+              redactCodexAccountHandleInText(arg, accountHandle),
+            ),
+          }
+        : {}),
+    });
+}
+
+/** Redacts `accountHandle` from an Error's message before rethrowing. */
+export function redactCodexAccountHandleInError(
+  error: unknown,
+  accountHandle: string | null | undefined,
+): unknown {
+  if (!accountHandle || !(error instanceof Error)) return error;
+  if (!error.message.includes(accountHandle)) return error;
+  error.message = redactCodexAccountHandleInText(error.message, accountHandle);
+  return error;
 }

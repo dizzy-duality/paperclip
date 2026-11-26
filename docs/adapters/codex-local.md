@@ -62,20 +62,36 @@ A managed home is created empty, so the adapter must provision auth into it befo
 ### Auth ownership and precedence
 
 `codex_local` is host-owns-auth when Paperclip owns the effective
-`CODEX_HOME`. The winning credential file is:
+`CODEX_HOME`. The winning credential source (in precedence order) is:
 
-1. **Per-agent API key:** when adapter env contains a non-empty
-   `OPENAI_API_KEY`, Paperclip writes `$CODEX_HOME/auth.json` with only
-   `{ "OPENAI_API_KEY": "..." }`. This overwrites any existing file or symlink
-   at that path. Codex CLI versions that Paperclip supports read the key from
-   `auth.json`, not directly from the process environment.
-2. **Host ChatGPT-subscription login:** when no per-agent key is configured,
-   Paperclip symlinks `auth.json` from the shared host Codex home into the
-   managed home. The symlink keeps rotating/single-use refresh tokens live
-   instead of copying a stale token into the managed home.
-3. **External `CODEX_HOME`:** if adapter env points `CODEX_HOME` outside the
-   Paperclip-managed company tree, that home is self-managed. Paperclip does
-   not seed or overwrite it, so its own `auth.json` wins.
+1. **Managed AI connection (`managedAiConnection`):** Paperclip provisions an
+   isolated per-run credential home (`provider/auth.json`) and ignores legacy
+   `OPENAI_API_KEY` / `CODEX_AUTH_JSON` / `CODEX_HOME` bindings.
+2. **Per-agent API key (`OPENAI_API_KEY`):** when adapter env contains a
+   non-empty `OPENAI_API_KEY`, Paperclip writes `$CODEX_HOME/auth.json` with
+   only `{ "OPENAI_API_KEY": "..." }`. This overwrites any existing file or
+   symlink at that path. Codex CLI versions that Paperclip supports read the
+   key from `auth.json`, not directly from the process environment.
+3. **Per-organisation / per-agent subscription secret (`CODEX_AUTH_JSON`):**
+   when adapter env contains `CODEX_AUTH_JSON` (raw JSON or base64-encoded
+   ChatGPT subscription `auth.json`, recommended as a company `secret_ref`),
+   Paperclip validates it fail-closed (never falling back to the shared host
+   login on an invalid or future-skewed payload), materializes it into the
+   company-scoped per-account slot
+   `companies/<companyId>/codex-auth-cache/<accountHandle>/auth.json` while
+   preserving strictly-newer rotated refresh tokens already in that slot,
+   strips `CODEX_AUTH_JSON` from child process environments and logs, and
+   copies strictly-newer rotated tokens back to that slot on sandbox teardown.
+4. **Host or promoted company ChatGPT-subscription login:** when none of the
+   above is configured, Paperclip uses the company's promoted
+   `companies/<companyId>/codex-home/auth.json` (if present) or symlinks
+   `auth.json` from the shared host Codex home into the managed home. The
+   symlink keeps rotating/single-use refresh tokens live instead of copying a
+   stale token into the managed home.
+5. **External `CODEX_HOME`:** if adapter env points `CODEX_HOME` outside the
+   Paperclip-managed company tree (without `managedAiConnection`,
+   `OPENAI_API_KEY`, or `CODEX_AUTH_JSON`), that home is self-managed.
+   Paperclip does not seed or overwrite it, so its own `auth.json` wins.
 
 For sandbox or SSH execution, Paperclip uploads the effective managed
 `CODEX_HOME` and launches Codex with `CODEX_HOME` pointing at that uploaded
