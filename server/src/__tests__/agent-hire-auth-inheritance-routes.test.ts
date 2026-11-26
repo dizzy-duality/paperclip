@@ -226,6 +226,23 @@ describeEmbeddedPostgres("hired agent provider credential inheritance", () => {
       secretId: apiKeySecret.id,
     });
     expect(childEnvOf(overrideRes).CODEX_AUTH_JSON).toBeUndefined();
+
+    // Parent binding BOTH OPENAI_API_KEY and CODEX_AUTH_JSON only passes OPENAI_API_KEY to child.
+    const bothParent = await seedParentAgent(companyId, "codex_local", {
+      OPENAI_API_KEY: secretRef(apiKeySecret.id),
+      CODEX_AUTH_JSON: secretRef(authJsonSecret.id),
+    });
+    const bothChildRes = await hire(agentActor(companyId, bothParent.id), companyId, {
+      name: "Codex Both Parent Child",
+      role: "engineer",
+      adapterType: "codex_local",
+    });
+    expect(bothChildRes.status, JSON.stringify(bothChildRes.body)).toBe(201);
+    expect(childEnvOf(bothChildRes).OPENAI_API_KEY).toMatchObject({
+      type: "secret_ref",
+      secretId: apiKeySecret.id,
+    });
+    expect(childEnvOf(bothChildRes).CODEX_AUTH_JSON).toBeUndefined();
   });
 
   it("keeps a pinned version selector on the copied reference and its derived binding", async () => {

@@ -16,8 +16,10 @@ import {
   redactCodexAccountHandleInError,
   redactCodexAccountHandleInValue,
   stripCodexAuthJsonFromEnv,
+  wrapOnEventRedactingCodexAccountHandle,
   wrapOnLogRedactingCodexAccountHandle,
   wrapOnMetaRedactingCodexAccountHandle,
+  wrapOnRuntimeProgressRedactingCodexAccountHandle,
 } from "./codex-auth-json.js";
 import {
   ensureCodexAuthCacheEntryDir,
@@ -613,9 +615,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     return executeCodexAcp(ctx);
   }
 
-  const { runId, agent, runtime, config, context, onLog: rawOnLog, onMeta: rawOnMeta, onEvent, onSpawn, authToken } = ctx;
+  const { runId, agent, runtime, config, context, onLog: rawOnLog, onMeta: rawOnMeta, onEvent: rawOnEvent, onSpawn, authToken } = ctx;
   let onLog = rawOnLog;
   let onMeta = rawOnMeta;
+  let onEvent = rawOnEvent;
+  let onRuntimeProgress = ctx.onRuntimeProgress;
   let materializedCodexAccountHandle: string | null = null;
 
   const promptTemplate = asString(
@@ -692,6 +696,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     materializedCodexAccountHandle = materialized.accountHandle;
     onLog = wrapOnLogRedactingCodexAccountHandle(rawOnLog, materializedCodexAccountHandle);
     onMeta = wrapOnMetaRedactingCodexAccountHandle(rawOnMeta, materializedCodexAccountHandle);
+    onEvent = wrapOnEventRedactingCodexAccountHandle(rawOnEvent, materializedCodexAccountHandle);
+    onRuntimeProgress = wrapOnRuntimeProgressRedactingCodexAccountHandle(
+      ctx.onRuntimeProgress,
+      materializedCodexAccountHandle,
+    );
     configuredCodexHome = materialized.accountHomeDir;
   }
   try {
@@ -920,7 +929,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             installCommand: SANDBOX_INSTALL_COMMAND,
             detectCommand: command,
             onProgress: (line) => onLog("stdout", line),
-            onRuntimeProgress: ctx.onRuntimeProgress,
+            onRuntimeProgress,
             assets: [
               {
                 key: "home",

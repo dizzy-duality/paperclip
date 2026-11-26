@@ -428,6 +428,7 @@ process.stdin.on("end", () => {
       marker: "colleague-y-secret",
     });
 
+    let loggedMeta: Record<string, unknown> | undefined;
     let loggedMetaEnv: Record<string, string> | undefined;
     const logs: string[] = [];
     const result = await execute({
@@ -459,6 +460,7 @@ process.stdin.on("end", () => {
         logs.push(chunk);
       },
       onMeta: async (meta) => {
+        loggedMeta = meta as unknown as Record<string, unknown>;
         loggedMetaEnv = meta.env;
       },
     });
@@ -476,7 +478,8 @@ process.stdin.on("end", () => {
     expect(loggedMetaEnv).toBeDefined();
     expect(loggedMetaEnv?.CODEX_AUTH_JSON).toBeUndefined();
     expect(loggedMetaEnv?.CODEX_HOME).toContain(REDACTED_CODEX_ACCOUNT_HANDLE);
-    expect(JSON.stringify(loggedMetaEnv)).not.toContain("acct-colleague-y");
+    expect(JSON.stringify(loggedMeta)).not.toContain("acct-colleague-y");
+    expect(JSON.stringify(result)).not.toContain("acct-colleague-y");
     expect(logs.join("")).not.toContain("refresh-colleague-y-secret");
     expect(logs.join("")).not.toContain("acct-colleague-y");
     // Host login for User X remained completely untouched.
@@ -756,6 +759,7 @@ describe("ACP lane CODEX_AUTH_JSON wiring", () => {
     const { createRuntime, ensureSession } = makeStubAcpRuntime();
     const acpExec = createCodexAcpExecutor({ createRuntime });
     const logs: string[] = [];
+    let fullMeta: Record<string, unknown> | undefined;
     let metaEnv: Record<string, string> | undefined;
     const result = await acpExec({
       runId: "run-acp-secret",
@@ -782,6 +786,7 @@ describe("ACP lane CODEX_AUTH_JSON wiring", () => {
         logs.push(chunk);
       },
       onMeta: async (meta) => {
+        fullMeta = meta as unknown as Record<string, unknown>;
         metaEnv = meta.env;
       },
     });
@@ -802,7 +807,9 @@ describe("ACP lane CODEX_AUTH_JSON wiring", () => {
     expect(metaEnv?.CODEX_AUTH_JSON).toBeUndefined();
     expect(metaEnv?.CODEX_HOME).toContain(path.join("companies", "org-b", "codex-auth-cache", REDACTED_CODEX_ACCOUNT_HANDLE));
     expect(logs.join("")).not.toContain("acct-acp-colleague-y");
-    expect(JSON.stringify(metaEnv ?? {})).not.toContain("acct-acp-colleague-y");
+    expect(fullMeta).toBeDefined();
+    expect(JSON.stringify(fullMeta)).not.toContain("acct-acp-colleague-y");
+    expect(JSON.stringify(result)).not.toContain("acct-acp-colleague-y");
   });
 
   it("ignores CODEX_AUTH_JSON on ACP when managedAiConnection or OPENAI_API_KEY is configured, and strips it", async () => {

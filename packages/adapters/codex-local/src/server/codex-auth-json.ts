@@ -243,43 +243,34 @@ export function wrapOnLogRedactingCodexAccountHandle(
   return (stream, chunk) => onLog(stream, redactCodexAccountHandleInText(chunk, accountHandle));
 }
 
-/** Wraps `onMeta` so the `CODEX_AUTH_JSON` account handle never reaches invocation metadata. */
+/** Wraps `onMeta` so the `CODEX_AUTH_JSON` account handle never reaches any field of invocation metadata. */
 export function wrapOnMetaRedactingCodexAccountHandle(
   onMeta: AdapterExecutionContext["onMeta"],
   accountHandle: string | null | undefined,
 ): AdapterExecutionContext["onMeta"] {
   if (!onMeta || !accountHandle) return onMeta;
-  return (meta) =>
-    onMeta({
-      ...meta,
-      ...(meta.env
-        ? {
-            env: Object.fromEntries(
-              Object.entries(meta.env).map(([k, v]) => [
-                k,
-                typeof v === "string" ? redactCodexAccountHandleInText(v, accountHandle) : v,
-              ]),
-            ),
-          }
-        : {}),
-      ...(meta.commandNotes
-        ? {
-            commandNotes: meta.commandNotes.map((note) =>
-              redactCodexAccountHandleInText(note, accountHandle),
-            ),
-          }
-        : {}),
-      ...(meta.commandArgs
-        ? {
-            commandArgs: meta.commandArgs.map((arg) =>
-              redactCodexAccountHandleInText(arg, accountHandle),
-            ),
-          }
-        : {}),
-    });
+  return (meta) => onMeta(redactCodexAccountHandleInValue(meta, accountHandle));
 }
 
-/** Deeply redacts `accountHandle` from every string in a plain value (objects/arrays/strings). */
+/** Wraps `onEvent` so the `CODEX_AUTH_JSON` account handle never reaches emitted run events. */
+export function wrapOnEventRedactingCodexAccountHandle(
+  onEvent: AdapterExecutionContext["onEvent"],
+  accountHandle: string | null | undefined,
+): AdapterExecutionContext["onEvent"] {
+  if (!onEvent || !accountHandle) return onEvent;
+  return (event) => onEvent(redactCodexAccountHandleInValue(event, accountHandle));
+}
+
+/** Wraps `onRuntimeProgress` so the `CODEX_AUTH_JSON` account handle never reaches runtime progress events. */
+export function wrapOnRuntimeProgressRedactingCodexAccountHandle(
+  onRuntimeProgress: AdapterExecutionContext["onRuntimeProgress"],
+  accountHandle: string | null | undefined,
+): AdapterExecutionContext["onRuntimeProgress"] {
+  if (!onRuntimeProgress || !accountHandle) return onRuntimeProgress;
+  return (progress) => onRuntimeProgress(redactCodexAccountHandleInValue(progress, accountHandle));
+}
+
+/** Deeply redacts `accountHandle` from every string value in a plain value (objects/arrays/strings). Leaves object keys intact. */
 export function redactCodexAccountHandleInValue<T>(
   value: T,
   accountHandle: string | null | undefined,
@@ -308,7 +299,7 @@ export function redactCodexAccountHandleInValue<T>(
     const out: Record<string, unknown> = {};
     seen.set(node, out);
     for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
-      out[redactCodexAccountHandleInText(k, accountHandle)] = walk(v);
+      out[k] = walk(v);
     }
     return out;
   };

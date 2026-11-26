@@ -48,8 +48,10 @@ import {
   redactCodexAccountHandleInError,
   redactCodexAccountHandleInValue,
   stripCodexAuthJsonFromEnv,
+  wrapOnEventRedactingCodexAccountHandle,
   wrapOnLogRedactingCodexAccountHandle,
   wrapOnMetaRedactingCodexAccountHandle,
+  wrapOnRuntimeProgressRedactingCodexAccountHandle,
 } from "./codex-auth-json.js";
 import {
   buildCodexHomeRefreshProvision,
@@ -423,6 +425,11 @@ export function createCodexAcpExecutor(options: CodexAcpExecutorOptions = {}): C
         ...ctx,
         onLog: wrapOnLogRedactingCodexAccountHandle(ctx.onLog, materializedAccountHandle),
         onMeta: wrapOnMetaRedactingCodexAccountHandle(ctx.onMeta, materializedAccountHandle),
+        onEvent: wrapOnEventRedactingCodexAccountHandle(ctx.onEvent, materializedAccountHandle),
+        onRuntimeProgress: wrapOnRuntimeProgressRedactingCodexAccountHandle(
+          ctx.onRuntimeProgress,
+          materializedAccountHandle,
+        ),
         config: buildCodexAcpConfig({ ...rawConfig, env: sanitizedEnv }),
       });
       return redactCodexAccountHandleInValue(

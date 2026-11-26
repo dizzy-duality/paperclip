@@ -38,6 +38,8 @@ export {
   redactCodexAccountHandleInValue,
   wrapOnLogRedactingCodexAccountHandle,
   wrapOnMetaRedactingCodexAccountHandle,
+  wrapOnEventRedactingCodexAccountHandle,
+  wrapOnRuntimeProgressRedactingCodexAccountHandle,
   redactCodexAccountHandleInError,
   type ParsedCodexAuthJson,
   type ParseCodexAuthJsonOptions,
