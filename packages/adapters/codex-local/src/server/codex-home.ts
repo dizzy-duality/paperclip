@@ -7,6 +7,7 @@ import { shellQuote } from "@paperclipai/adapter-utils/ssh";
 import { buildCodexAuthInboundProvision, CODEX_AUTH_MERGE_EXTRACT_SCRIPT_NAME } from "./codex-auth-merge-scripts.js";
 import { resolvePaperclipInstanceRootForAdapter } from "@paperclipai/adapter-utils/server-utils";
 import { isCodexAuthCachePath, readSubscriptionAccountId } from "./codex-auth-cache.js";
+import { parseCodexAuthJsonEnv } from "./codex-auth-json.js";
 
 const TRUTHY_ENV_RE = /^(1|true|yes|on)$/i;
 const COPIED_SHARED_FILES = ["config.json", "config.toml", "instructions.md"] as const;
@@ -834,6 +835,99 @@ export type ReconcileManagedCodexHomeStatus =
   | "source_auth_missing"
   | "seeded";
 
+export interface ResolveCodexAuthCopyBackTargetInput {
+  env?: NodeJS.ProcessEnv;
+  companyId?: string;
+  managedAiConnection: boolean;
+  runtimeCredentialHome: string | null;
+  effectiveCodexHome: string;
+}
+
+/**
+ * Resolves the authoritative host `auth.json` file that sandbox teardown
+ * copy-back should update when Codex rotates a refresh token.
+ *
+ * - For managed AI connections, always targets the credential home
+ *   (`runtimeCredentialHome ?? effectiveCodexHome`) rather than a generated
+ *   `skill-runtimes/` symlink directory, so `ai-connection-runtime.ts` sees
+ *   the refreshed token in `provider/auth.json`.
+ * - For Paperclip-managed company homes (`companies/<companyId>/...`), follows
+ *   any symlink from `auth.json` to its backing file (e.g. a shared host
+ *   `auth.json` or a company-scoped `codex-auth-cache/<handle>/auth.json`), or
+ *   targets the regular file directly when the managed home owns its own
+ *   credential (promoted company default home or `CODEX_AUTH_JSON` account
+ *   home).
+ * - For external user-supplied `CODEX_HOME` overrides (which Paperclip must
+ *   not overwrite) or when no `auth.json` exists yet on the host (e.g. a
+ *   sandbox-only baked-in login), falls back to the shared host `auth.json`
+ *   path so the merge predicate preserves existing invariants.
+ */
+export async function resolveCodexAuthCopyBackTarget(
+  input: ResolveCodexAuthCopyBackTargetInput,
+): Promise<string> {
+  const env = input.env ?? process.env;
+  const credentialHome = input.runtimeCredentialHome ?? input.effectiveCodexHome;
+  const candidateAuthPath = path.join(credentialHome, "auth.json");
+  if (input.managedAiConnection) {
+    return candidateAuthPath;
+  }
+
+  if (isManagedCodexHomePath(env, input.companyId, credentialHome)) {
+    const stat = await fs.lstat(candidateAuthPath).catch(() => null);
+    if (stat?.isFile()) {
+      return candidateAuthPath;
+    }
+    if (stat?.isSymbolicLink()) {
+      const resolved = await fs.realpath(candidateAuthPath).catch(async () => {
+        const linkTarget = await fs.readlink(candidateAuthPath).catch(() => null);
+        return linkTarget ? path.resolve(path.dirname(candidateAuthPath), linkTarget) : null;
+      });
+      if (resolved) return resolved;
+    }
+  }
+  return path.join(resolveSharedCodexHomeDir(env), "auth.json");
+}
+
+export interface ResolveCodexVendTargetInput {
+  env?: NodeJS.ProcessEnv;
+  companyId?: string;
+  configuredCodexHome: string | null;
+}
+
+/**
+ * Resolves which host `auth.json` file (if any) should be refreshed from the
+ * company-scoped per-identity auth cache before seeding/launching a run.
+ *
+ * - Returns `null` when the configured home is already a `codex-auth-cache`
+ *   entry (it already reads directly from the cache slot) or is an external
+ *   user-managed `CODEX_HOME` (which Paperclip must not mutate).
+ * - When the active managed home holds a regular-file `auth.json` (for example
+ *   a promoted per-company default login), vends directly into that file so
+ *   that company's account stays refreshed without touching the shared host.
+ * - Otherwise vends into the shared host `auth.json`.
+ */
+export async function resolveCodexVendTargetAuthPath(
+  input: ResolveCodexVendTargetInput,
+): Promise<string | null> {
+  const env = input.env ?? process.env;
+  const configured = input.configuredCodexHome ? path.resolve(input.configuredCodexHome) : null;
+  if (configured) {
+    if (isCodexAuthCachePath(env, configured)) {
+      return null;
+    }
+    if (!isManagedCodexHomePath(env, input.companyId, configured)) {
+      return null;
+    }
+  }
+  const activeHome = configured ?? resolveManagedCodexHomeDir(env, input.companyId);
+  const activeAuthPath = path.join(activeHome, "auth.json");
+  const existing = await fs.lstat(activeAuthPath).catch(() => null);
+  if (existing?.isFile()) {
+    return activeAuthPath;
+  }
+  return path.join(resolveSharedCodexHomeDir(env), "auth.json");
+}
+
 export interface ReconcileManagedCodexHomeInput {
   companyId: string | undefined;
   configuredCodexHome: string | null | undefined;
@@ -846,6 +940,13 @@ export interface ReconcileManagedCodexHomeInput {
    * subscription symlink.
    */
   apiKeySecretBound?: boolean;
+  /**
+   * Set when the agent configures `CODEX_AUTH_JSON` (plain or secret binding).
+   * At execute time `CODEX_AUTH_JSON` materializes into its own company-scoped
+   * account home, so startup reconciliation must not seed a shared host symlink
+   * into the agent's managed home.
+   */
+  authJsonSecretBound?: boolean;
   env?: NodeJS.ProcessEnv;
   onLog?: AdapterExecutionContext["onLog"];
 }
@@ -888,6 +989,10 @@ export async function reconcileManagedCodexHome(
   // preserve it. Re-seeding without the key would delete that file and restore
   // the shared subscription symlink, silently changing the agent's credentials
   // on every boot while the persisted config still says "use the secret key".
+  if (input.authJsonSecretBound) {
+    return { status: "already_seeded", home: resolved };
+  }
+
   if (input.apiKeySecretBound && hadUsableAuth) {
     return { status: "already_seeded", home: resolved };
   }
@@ -919,6 +1024,8 @@ export interface CodexCredentialReadinessInput {
   configuredCodexHome: string | null | undefined;
   /** Resolved `config.env.OPENAI_API_KEY` value (after secret resolution). */
   configuredApiKey: string | null | undefined;
+  /** Resolved `config.env.CODEX_AUTH_JSON` value (raw JSON or base64), if any. */
+  configuredAuthJson?: string | null | undefined;
 }
 
 export interface CodexCredentialReadiness {
@@ -930,6 +1037,8 @@ export interface CodexCredentialReadiness {
   effectiveHome: string;
   /** The shared source home subscription auth is symlinked from (managed homes only). */
   sharedSourceHome: string;
+  /** Non-secret reason when a configured credential payload failed validation. */
+  invalidReason?: "invalid_codex_auth_json";
 }
 
 /**
@@ -939,9 +1048,12 @@ export interface CodexCredentialReadiness {
  * check *before* dispatch and surface a configuration-incomplete blocker instead
  * of dispatching a run that is guaranteed to fail with "no Codex credentials".
  *
+ * - A non-empty resolved `OPENAI_API_KEY` means API-key auth, always ready.
+ * - A non-empty resolved `CODEX_AUTH_JSON` is validated fail-closed as a
+ *   ChatGPT subscription `auth.json` (raw JSON or base64); invalid values never
+ *   fall back to the shared host login.
  * - An external/user-supplied `CODEX_HOME` override manages its own auth, so it
  *   is always treated as ready (Paperclip must not seed or inspect it).
- * - A non-empty resolved `OPENAI_API_KEY` means API-key auth, always ready.
  * - Otherwise (subscription mode) the run needs a usable `auth.json`. Because a
  *   managed home symlinks `auth.json` from the shared source home at seed time,
  *   we treat the run as ready when either the (possibly already-seeded) effective
@@ -954,6 +1066,7 @@ export async function evaluateCodexCredentialReadiness(
   const configuredRaw = nonEmpty(input.configuredCodexHome ?? undefined);
   const configuredCodexHome = configuredRaw ? path.resolve(configuredRaw) : null;
   const configuredApiKey = nonEmpty(input.configuredApiKey ?? undefined);
+  const configuredAuthJson = nonEmpty(input.configuredAuthJson ?? undefined);
   const sharedSourceHome = resolveSharedCodexHomeDir(env);
 
   const configuredHomeIsManaged =
@@ -961,19 +1074,47 @@ export async function evaluateCodexCredentialReadiness(
   const effectiveHomeIsManaged = configuredCodexHome == null || configuredHomeIsManaged;
   const effectiveHome = configuredCodexHome ?? resolveManagedCodexHomeDir(env, input.companyId);
 
-  if (!effectiveHomeIsManaged) {
-    // Genuine external override: Paperclip never seeds or inspects it.
+  if (configuredApiKey) {
     return {
-      managed: false,
-      authMode: configuredApiKey ? "api" : "subscription",
+      managed: effectiveHomeIsManaged,
+      authMode: "api",
       ready: true,
       effectiveHome,
       sharedSourceHome,
     };
   }
 
-  if (configuredApiKey) {
-    return { managed: true, authMode: "api", ready: true, effectiveHome, sharedSourceHome };
+  if (configuredAuthJson) {
+    try {
+      parseCodexAuthJsonEnv(configuredAuthJson);
+      return {
+        managed: true,
+        authMode: "subscription",
+        ready: true,
+        effectiveHome,
+        sharedSourceHome,
+      };
+    } catch {
+      return {
+        managed: true,
+        authMode: "subscription",
+        ready: false,
+        effectiveHome,
+        sharedSourceHome,
+        invalidReason: "invalid_codex_auth_json",
+      };
+    }
+  }
+
+  if (!effectiveHomeIsManaged) {
+    // Genuine external override: Paperclip never seeds or inspects it.
+    return {
+      managed: false,
+      authMode: "subscription",
+      ready: true,
+      effectiveHome,
+      sharedSourceHome,
+    };
   }
 
   const ready =

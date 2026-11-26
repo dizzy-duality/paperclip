@@ -11,6 +11,11 @@ import { inferOpenAiCompatibleBiller, resolveManagedOpenAiBilling, type AdapterE
 import { buildCodexAuthInboundProvision } from "./codex-auth-merge-scripts.js";
 import { copyBackCodexAuth } from "./codex-auth-copyback.js";
 import {
+  CODEX_AUTH_JSON_ENV_KEY,
+  materializeCodexAuthJsonSecret,
+  stripCodexAuthJsonFromEnv,
+} from "./codex-auth-json.js";
+import {
   ensureCodexAuthCacheEntryDir,
   isCodexAuthCacheEnabled,
   readSubscriptionAccountId,
@@ -81,6 +86,8 @@ import {
   isManagedCodexHomePath,
   pathExists,
   prepareManagedCodexHome,
+  resolveCodexAuthCopyBackTarget,
+  resolveCodexVendTargetAuthPath,
   resolveManagedCodexHomeDir,
   resolveSharedCodexHomeDir,
   seedManagedCodexHome,
@@ -390,6 +397,7 @@ export async function assertCodexCredentialsLaunchable(input: {
   companyId: string;
   configuredCodexHome: string | null;
   configuredApiKey: string | null;
+  configuredAuthJson?: string | null;
   effectiveCodexHome: string;
   target: MaybeResolvedExecutionTarget;
   cwd: string;
@@ -401,8 +409,15 @@ export async function assertCodexCredentialsLaunchable(input: {
     companyId: input.companyId,
     configuredCodexHome: input.configuredCodexHome,
     configuredApiKey: input.configuredApiKey,
+    configuredAuthJson: input.configuredAuthJson,
   });
   if (!credentialReadiness.managed || credentialReadiness.ready) return;
+  if (credentialReadiness.invalidReason === "invalid_codex_auth_json") {
+    throw new Error(
+      `CODEX_AUTH_JSON is invalid for managed home "${input.effectiveCodexHome}": ` +
+        `expected a ChatGPT subscription auth.json payload (raw JSON or base64) with tokens and account_id.`,
+    );
+  }
 
   const targetIsSandbox =
     input.target?.kind === "remote" && input.target.transport === "sandbox";
@@ -643,6 +658,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     : useConfiguredInsteadOfAgentHome ? "" : workspaceCwd;
   const cwd = effectiveWorkspaceCwd || configuredCwd || process.cwd();
   const envConfig = parseObject(config.env);
+  const sanitizedEnvConfig = stripCodexAuthJsonFromEnv(envConfig);
   const executionTargetIsRemote = adapterExecutionTargetIsRemote(executionTarget);
   let configuredCodexHome =
     typeof envConfig.CODEX_HOME === "string" && envConfig.CODEX_HOME.trim().length > 0
@@ -652,6 +668,22 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     typeof envConfig.OPENAI_API_KEY === "string" && envConfig.OPENAI_API_KEY.trim().length > 0
       ? envConfig.OPENAI_API_KEY.trim()
       : null;
+  const configuredCodexAuthJson =
+    !config.managedAiConnection &&
+    !configuredOpenAiApiKey &&
+    typeof envConfig.CODEX_AUTH_JSON === "string" &&
+    envConfig.CODEX_AUTH_JSON.trim().length > 0
+      ? envConfig.CODEX_AUTH_JSON.trim()
+      : null;
+  if (configuredCodexAuthJson) {
+    const materialized = await materializeCodexAuthJsonSecret({
+      raw: configuredCodexAuthJson,
+      companyId: agent.companyId,
+      env: process.env,
+      log: (line) => onLog("stdout", `${line}\n`),
+    });
+    configuredCodexHome = materialized.accountHomeDir;
+  }
   const skillSourceHome = configuredCodexHome;
   const connectorSkillDigest = typeof config.paperclipConnectorSkillDigest === "string"
     && /^[a-f0-9]{64}$/.test(config.paperclipConnectorSkillDigest) ? config.paperclipConnectorSkillDigest : null;
@@ -708,23 +740,29 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // additive: the managed home still symlinks the shared `auth.json`, now at its
   // freshest same-identity copy. The off-switch (default on) skips the vend.
   if (!config.managedAiConnection && isCodexAuthCacheEnabled(process.env)) {
-    const sharedHomeAuthPath = path.join(resolveSharedCodexHomeDir(process.env), "auth.json");
-    // This caller reads `process.env` directly and holds no separate `env`
-    // object, so `selectVendCredential` falls back to its own `process.env`
-    // default for the merge lock root.
-    await selectVendCredential(
-      sharedHomeAuthPath,
-      (accountId) => resolveCodexAuthCacheEntryPath(process.env, accountId, agent.companyId),
-      (line) => onLog("stdout", `${line}\n`),
-    ).catch(async (error) => {
-      // The vend is best-effort and additive. A vend failure must never block a
-      // run: log and fall through to seed from the unrefreshed shared credential.
-      await onLog(
-        "stderr",
-        `[paperclip] Codex auth cache: vend skipped after an error; using the shared credential as-is.\n`,
-      );
-      void error;
+    const vendTargetAuthPath = await resolveCodexVendTargetAuthPath({
+      env: process.env,
+      companyId: agent.companyId,
+      configuredCodexHome: runtimeCredentialHome ?? configuredCodexHome,
     });
+    if (vendTargetAuthPath) {
+      // This caller reads `process.env` directly and holds no separate `env`
+      // object, so `selectVendCredential` falls back to its own `process.env`
+      // default for the merge lock root.
+      await selectVendCredential(
+        vendTargetAuthPath,
+        (accountId) => resolveCodexAuthCacheEntryPath(process.env, accountId, agent.companyId),
+        (line) => onLog("stdout", `${line}\n`),
+      ).catch(async (error) => {
+        // The vend is best-effort and additive. A vend failure must never block a
+        // run: log and fall through to seed from the unrefreshed credential.
+        await onLog(
+          "stderr",
+          `[paperclip] Codex auth cache: vend skipped after an error; using the host credential as-is.\n`,
+        );
+        void error;
+      });
+    }
   }
   if (configuredCodexHome == null) {
     await prepareManagedCodexHome(process.env, onLog, agent.companyId, {
@@ -758,6 +796,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     companyId: agent.companyId,
     configuredCodexHome,
     configuredApiKey: configuredOpenAiApiKey,
+    configuredAuthJson: configuredCodexAuthJson,
     effectiveCodexHome,
     target: executionTarget,
     cwd,
@@ -769,7 +808,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // A caller-owned home stays untouched. A generated skill home receives the
   // configured provider routing even when it seeds credentials from that home.
   const envConfigStrings = Object.fromEntries(
-    Object.entries(envConfig).filter(
+    Object.entries(sanitizedEnvConfig).filter(
       (entry): entry is [string, string] => typeof entry[1] === "string",
     ),
   );
@@ -894,7 +933,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
                 restore: async ({ assetDir, readFile }) =>
                   void (await copyBackCodexAuth({
                     readSandboxAuth: () => readFile(path.posix.join(assetDir, "auth.json")),
-                    hostAuthPath: path.join(config.managedAiConnection ? effectiveCodexHome : resolveSharedCodexHomeDir(process.env), "auth.json"),
+                    hostAuthPath: await resolveCodexAuthCopyBackTarget({
+                      env: process.env,
+                      companyId: agent.companyId,
+                      managedAiConnection: Boolean(config.managedAiConnection),
+                      runtimeCredentialHome,
+                      effectiveCodexHome,
+                    }),
                     log: (line) => onLog("stdout", `${line}\n`),
                     // Additive cache write (sandbox to host): also cache the
                     // sandbox subscription credential in its per-identity slot,
@@ -985,7 +1030,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
     refreshPaperclipWorkspaceEnvForExecution({
       env,
-      envConfig,
+      envConfig: sanitizedEnvConfig,
       workspaceCwd: effectiveWorkspaceCwd,
       workspaceSource,
       workspaceStrategy,
@@ -1033,9 +1078,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         Object.assign(env, paperclipBridge.env);
       }
     }
+    delete env[CODEX_AUTH_JSON_ENV_KEY];
     const effectiveEnv = Object.fromEntries(
       Object.entries({ ...process.env, ...env }).filter(
-        (entry): entry is [string, string] => typeof entry[1] === "string",
+        (entry): entry is [string, string] =>
+          entry[0] !== CODEX_AUTH_JSON_ENV_KEY && typeof entry[1] === "string",
       ),
     );
     const managedBilling = resolveManagedOpenAiBilling(config.managedAiRouting);

@@ -610,4 +610,57 @@ describe("codex remote environment diagnostics", () => {
     expect(stat.isSymbolicLink()).toBe(false);
     expect(await fs.readFile(path.join(externalHome, "auth.json"), "utf8")).toBe(external);
   });
+
+  it("stages CODEX_AUTH_JSON (base64) into the sandbox probe home instead of shared host auth and strips it from probe env", async () => {
+    const sharedHost = subscriptionAuth("acct-host-x", "host-user-x", "2026-07-09T02:00:00Z");
+    const colleagueY = subscriptionAuth("acct-colleague-y", "colleague-y", "2026-07-09T01:00:00Z");
+    await fs.writeFile(path.join(process.env.CODEX_HOME!, "auth.json"), sharedHost, "utf8");
+
+    const result = await testEnvironment({
+      companyId: "company-org-b",
+      adapterType: "codex_local",
+      config: {
+        engine: "cli",
+        command: "codex",
+        env: {
+          OPENAI_API_KEY: "",
+          CODEX_AUTH_JSON: Buffer.from(colleagueY, "utf8").toString("base64"),
+        },
+      },
+      executionTarget: sandboxTarget(),
+      environmentName: "QA Daytona",
+    });
+
+    expect(result.status).toBe("pass");
+    expect(result.checks.some((check) => check.code === "codex_auth_json_present")).toBe(true);
+    expect(capturedHomeAssetAuthJson.value).toBe(colleagueY);
+    for (const call of runAdapterExecutionTargetProcess.mock.calls) {
+      const opts = (call as unknown[])[4] as { env?: Record<string, string> } | undefined;
+      expect(opts?.env?.CODEX_AUTH_JSON).toBeUndefined();
+    }
+  });
+
+  it("fails closed when CODEX_AUTH_JSON is invalid instead of probing with shared host auth", async () => {
+    const sharedHost = subscriptionAuth("acct-host-x", "host-user-x", "2026-07-09T02:00:00Z");
+    await fs.writeFile(path.join(process.env.CODEX_HOME!, "auth.json"), sharedHost, "utf8");
+
+    const result = await testEnvironment({
+      companyId: "company-org-b",
+      adapterType: "codex_local",
+      config: {
+        engine: "cli",
+        command: "codex",
+        env: {
+          OPENAI_API_KEY: "",
+          CODEX_AUTH_JSON: "invalid-secret-payload",
+        },
+      },
+      executionTarget: sandboxTarget(),
+      environmentName: "QA Daytona",
+    });
+
+    expect(result.status).toBe("fail");
+    expect(result.checks.some((check) => check.code === "codex_auth_json_invalid")).toBe(true);
+    expect(prepareAdapterExecutionTargetRuntime).not.toHaveBeenCalled();
+  });
 });

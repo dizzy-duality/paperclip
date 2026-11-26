@@ -61,6 +61,7 @@ export const AI_AUTH_ENV_KEYS = [
   "CLAUDE_CODE_OAUTH_TOKEN",
   "OPENAI_API_KEY",
   "CODEX_API_KEY",
+  "CODEX_AUTH_JSON",
   "OPENROUTER_API_KEY",
   "XAI_API_KEY",
   "GROK_API_KEY",
@@ -233,7 +234,7 @@ export function managedAiSessionFingerprintConfig(
   if (env.GEMINI_HOME === path.join(managedHome, "provider")) env.GEMINI_HOME = path.join("<managed-ai-home>", "provider");
   const managed = config.managedAiConnection as Record<string, unknown> | undefined;
   if (managed?.sessionIdentity) {
-    for (const key of ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY", "OPENROUTER_API_KEY", "XAI_API_KEY", "GROK_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENCODE_AUTH_JSON", "OPENCODE_CONFIG_CONTENT"]) {
+    for (const key of ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_AUTH_JSON", "OPENROUTER_API_KEY", "XAI_API_KEY", "GROK_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENCODE_AUTH_JSON", "OPENCODE_CONFIG_CONTENT"]) {
       if (env[key]) env[key] = "<managed-ai-credential>";
     }
   }

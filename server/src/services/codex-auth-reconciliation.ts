@@ -101,6 +101,7 @@ export async function reconcileCodexLocalManagedHomesOnStartup(
     const env = asRecord(asRecord(row.adapterConfig)?.env);
     const configuredCodexHome = env ? readPlainEnvValue(env.CODEX_HOME) : null;
     const apiKeyBinding = classifyApiKeyBinding(env?.OPENAI_API_KEY);
+    const authJsonBinding = classifyApiKeyBinding(env?.CODEX_AUTH_JSON);
 
     try {
       const result = await reconcileManagedCodexHome({
@@ -108,6 +109,7 @@ export async function reconcileCodexLocalManagedHomesOnStartup(
         configuredCodexHome,
         apiKey: apiKeyBinding.kind === "plain" ? apiKeyBinding.value : null,
         apiKeySecretBound: apiKeyBinding.kind === "secret",
+        authJsonSecretBound: authJsonBinding.kind !== "none",
       });
       switch (result.status) {
         case "seeded":

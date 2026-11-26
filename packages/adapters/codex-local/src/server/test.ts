@@ -28,9 +28,14 @@ import { buildCodexExecArgs } from "./codex-args.js";
 import {
   isManagedCodexHomePath,
   prepareManagedCodexHome,
-  resolveSharedCodexHomeDir,
+  resolveCodexVendTargetAuthPath,
   seedManagedCodexHome,
 } from "./codex-home.js";
+import {
+  CODEX_AUTH_JSON_ENV_KEY,
+  InvalidCodexAuthJsonError,
+  materializeCodexAuthJsonSecret,
+} from "./codex-auth-json.js";
 import {
   isCodexAuthCacheEnabled,
   resolveCodexAuthCacheEntryPath,
@@ -126,13 +131,19 @@ async function prepareCodexHelloProbe(input: {
     if (!input.managedAiConnection && isCodexAuthCacheEnabled(process.env)) {
       // Identity-anchored cache vend, exactly as execute runs it before the
       // seeding below. Best-effort: a vend failure never blocks the probe, and
-      // the probe then stages the shared credential as-is.
-      const sharedHomeAuthPath = path.join(resolveSharedCodexHomeDir(process.env), "auth.json");
-      await selectVendCredential(
-        sharedHomeAuthPath,
-        (accountId) => resolveCodexAuthCacheEntryPath(process.env, accountId, input.companyId),
-        async () => {},
-      ).catch(() => undefined);
+      // the probe then stages the credential as-is.
+      const vendTargetAuthPath = await resolveCodexVendTargetAuthPath({
+        env: process.env,
+        companyId: input.companyId,
+        configuredCodexHome,
+      });
+      if (vendTargetAuthPath) {
+        await selectVendCredential(
+          vendTargetAuthPath,
+          (accountId) => resolveCodexAuthCacheEntryPath(process.env, accountId, input.companyId),
+          async () => {},
+        ).catch(() => undefined);
+      }
     }
     let effectiveHome: string;
     if (configuredCodexHome == null) {
@@ -321,7 +332,38 @@ export async function testEnvironment(
   for (const [key, value] of Object.entries(envConfig)) {
     if (typeof value === "string") env[key] = value;
   }
+  const configOpenAiKey = env.OPENAI_API_KEY;
+  const configuredCodexAuthJson =
+    !config.managedAiConnection && !isNonEmpty(configOpenAiKey) && isNonEmpty(env[CODEX_AUTH_JSON_ENV_KEY])
+      ? env[CODEX_AUTH_JSON_ENV_KEY].trim()
+      : null;
+  // Never pass raw CODEX_AUTH_JSON into child probe processes or logs.
+  delete env[CODEX_AUTH_JSON_ENV_KEY];
   const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
+  delete runtimeEnv[CODEX_AUTH_JSON_ENV_KEY];
+  let codexAuthJsonValid = false;
+  if (configuredCodexAuthJson) {
+    try {
+      const materialized = await materializeCodexAuthJsonSecret({
+        raw: configuredCodexAuthJson,
+        companyId: ctx.companyId,
+        env: process.env,
+      });
+      env.CODEX_HOME = materialized.accountHomeDir;
+      runtimeEnv.CODEX_HOME = materialized.accountHomeDir;
+      codexAuthJsonValid = true;
+    } catch (err) {
+      checks.push({
+        code: "codex_auth_json_invalid",
+        level: "error",
+        message:
+          err instanceof InvalidCodexAuthJsonError
+            ? err.message
+            : "CODEX_AUTH_JSON is invalid and could not be materialized.",
+        hint: "Store the raw JSON or base64-encoded contents of ~/.codex/auth.json from `codex login` in the CODEX_AUTH_JSON secret.",
+      });
+    }
+  }
   const installCheck = await maybeRunSandboxInstallCommand({
     runId,
     target,
@@ -348,7 +390,6 @@ export async function testEnvironment(
     });
   }
 
-  const configOpenAiKey = env.OPENAI_API_KEY;
   const hostOpenAiKey = targetIsRemote || Object.hasOwn(env, "OPENAI_API_KEY")
     ? undefined : process.env.OPENAI_API_KEY;
   if (config.managedAiRouting) {
@@ -365,7 +406,13 @@ export async function testEnvironment(
       message: "OPENAI_API_KEY is set for Codex authentication.",
       detail: `Detected in ${source}.`,
     });
-  } else if (!targetIsRemote) {
+  } else if (codexAuthJsonValid) {
+    checks.push({
+      code: "codex_auth_json_present",
+      level: "info",
+      message: "CODEX_AUTH_JSON secret is configured for Codex subscription authentication.",
+    });
+  } else if (!configuredCodexAuthJson && !targetIsRemote) {
     // Local-only auth file check. On remote targets, the probe will surface
     // any missing-auth errors directly from the remote `codex` invocation.
     const codexHome = isNonEmpty(env.CODEX_HOME) ? env.CODEX_HOME : undefined;
@@ -387,8 +434,12 @@ export async function testEnvironment(
     }
   }
 
-  const canRunProbe =
-    checks.every((check) => check.code !== "codex_cwd_invalid" && check.code !== "codex_command_unresolvable");
+  const canRunProbe = checks.every(
+    (check) =>
+      check.code !== "codex_cwd_invalid" &&
+      check.code !== "codex_command_unresolvable" &&
+      check.code !== "codex_auth_json_invalid",
+  );
   // Models with a verified CLI floor are compared against the installed Codex
   // before the hello probe. A probe on an older CLI only produces the backend's
   // "not supported when using Codex with a ChatGPT account" rejection, which

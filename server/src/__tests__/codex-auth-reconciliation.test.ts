@@ -203,4 +203,24 @@ describe("reconcileCodexLocalManagedHomesOnStartup", () => {
       OPENAI_API_KEY: "sk-plain-1",
     });
   });
+
+  it("does not seed the shared host symlink when an agent binds CODEX_AUTH_JSON", async () => {
+    const agentHome = managedAgentHome("company-org-b", "agent-colleague");
+    const rows: AgentRow[] = [
+      {
+        id: "agent-colleague",
+        companyId: "company-org-b",
+        adapterConfig: {
+          env: {
+            CODEX_HOME: agentHome,
+            CODEX_AUTH_JSON: { type: "secret_ref", secretId: "22222222-2222-2222-2222-222222222222" },
+          },
+        },
+      },
+    ];
+
+    const summary = await reconcileCodexLocalManagedHomesOnStartup(makeDb(rows));
+    expect(summary).toMatchObject({ scanned: 1, seeded: 0, alreadySeeded: 1, failed: 0 });
+    await expect(fs.lstat(path.join(agentHome, "auth.json"))).rejects.toBeTruthy();
+  });
 });
