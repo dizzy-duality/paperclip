@@ -46,6 +46,7 @@ import {
   CODEX_AUTH_JSON_ENV_KEY,
   materializeCodexAuthJsonSecret,
   redactCodexAccountHandleInError,
+  redactCodexAccountHandleInValue,
   stripCodexAuthJsonFromEnv,
   wrapOnLogRedactingCodexAccountHandle,
   wrapOnMetaRedactingCodexAccountHandle,
@@ -424,7 +425,10 @@ export function createCodexAcpExecutor(options: CodexAcpExecutorOptions = {}): C
         onMeta: wrapOnMetaRedactingCodexAccountHandle(ctx.onMeta, materializedAccountHandle),
         config: buildCodexAcpConfig({ ...rawConfig, env: sanitizedEnv }),
       });
-      return withCodexAuthRefreshFailureClassification(result);
+      return redactCodexAccountHandleInValue(
+        withCodexAuthRefreshFailureClassification(result),
+        materializedAccountHandle,
+      );
     } catch (error) {
       throw redactCodexAccountHandleInError(error, materializedAccountHandle);
     }

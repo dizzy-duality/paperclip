@@ -35,6 +35,7 @@ export {
   materializeCodexAuthJsonSecret,
   stripCodexAuthJsonFromEnv,
   redactCodexAccountHandleInText,
+  redactCodexAccountHandleInValue,
   wrapOnLogRedactingCodexAccountHandle,
   wrapOnMetaRedactingCodexAccountHandle,
   redactCodexAccountHandleInError,

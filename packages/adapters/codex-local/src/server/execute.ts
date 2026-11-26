@@ -14,6 +14,7 @@ import {
   CODEX_AUTH_JSON_ENV_KEY,
   materializeCodexAuthJsonSecret,
   redactCodexAccountHandleInError,
+  redactCodexAccountHandleInValue,
   stripCodexAuthJsonFromEnv,
   wrapOnLogRedactingCodexAccountHandle,
   wrapOnMetaRedactingCodexAccountHandle,
@@ -1712,14 +1713,20 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           `[paperclip] Codex resume session "${sessionId}" is unavailable; retrying with a fresh session.\n`,
         );
         const retry = await runAttempt(null);
-        const retryResult = toResult(retry, true, true);
+        const retryResult = redactCodexAccountHandleInValue(
+          toResult(retry, true, true),
+          materializedCodexAccountHandle,
+        );
         if (retryResult.errorMessage) {
           executionError = new Error(retryResult.errorMessage);
         }
         return retryResult;
       }
 
-      const result = toResult(initial, false, false);
+      const result = redactCodexAccountHandleInValue(
+        toResult(initial, false, false),
+        materializedCodexAccountHandle,
+      );
       if (result.errorMessage) {
         executionError = new Error(result.errorMessage);
       }

@@ -8,6 +8,7 @@ import {
   REDACTED_CODEX_ACCOUNT_HANDLE,
   materializeCodexAuthJsonSecret,
   parseCodexAuthJsonEnv,
+  redactCodexAccountHandleInError,
   stripCodexAuthJsonFromEnv,
 } from "./codex-auth-json.js";
 import { createCodexAcpExecutor, testCodexAcpEnvironment } from "./acp.js";
@@ -564,6 +565,81 @@ process.stdin.on("end", () => {
     expect(caught).toBeInstanceOf(Error);
     expect(caught?.message).not.toContain("acct-sensitive-handle");
     expect(caught?.message).not.toContain("refresh-tok");
+
+    // Also verify redactCodexAccountHandleInError scrubs message, stack, path, and dest.
+    const fsErr = Object.assign(
+      new Error("EEXIST: file already exists, open '/tmp/codex-auth-cache/acct-sensitive-handle/auth.json'"),
+      {
+        path: "/tmp/codex-auth-cache/acct-sensitive-handle/auth.json",
+        dest: "/tmp/codex-auth-cache/acct-sensitive-handle/auth.json.tmp",
+      },
+    );
+    fsErr.stack = "Error: /tmp/codex-auth-cache/acct-sensitive-handle/auth.json\n  at test";
+    redactCodexAccountHandleInError(fsErr, "acct-sensitive-handle");
+    expect(fsErr.message).not.toContain("acct-sensitive-handle");
+    expect(fsErr.stack).not.toContain("acct-sensitive-handle");
+    expect(fsErr.path).not.toContain("acct-sensitive-handle");
+    expect(fsErr.dest).not.toContain("acct-sensitive-handle");
+  });
+
+  it("redacts accountHandle from returned AdapterExecutionResult when Codex fails naming CODEX_HOME", async () => {
+    const root = await makeScratchDir("paperclip-codex-exec-fail-redact-");
+    const sharedHome = path.join(root, "shared-host");
+    const workspaceDir = path.join(root, "workspace");
+    const fakeCodexPath = path.join(root, "fake-codex-fail");
+    await mkdir(sharedHome, { recursive: true });
+    await mkdir(workspaceDir, { recursive: true });
+    await writeFile(
+      fakeCodexPath,
+      `#!${process.execPath}
+process.stdin.resume();
+process.stdin.on("end", () => {
+  console.error("error: failed to load config at " + process.env.CODEX_HOME + "/config.toml");
+  process.exit(1);
+});
+`,
+      "utf8",
+    );
+    await chmod(fakeCodexPath, 0o755);
+
+    vi.stubEnv("PAPERCLIP_HOME", root);
+    vi.stubEnv("PAPERCLIP_INSTANCE_ID", "default");
+    vi.stubEnv("CODEX_HOME", sharedHome);
+
+    const secret = subscriptionAuthJson({
+      accountId: "acct-cli-fail-handle",
+      lastRefresh: "2026-10-01T11:00:00Z",
+      marker: "cli-fail",
+    });
+
+    const logs: string[] = [];
+    const result = await execute({
+      runId: "run-cli-fail-redact",
+      agent: {
+        id: "agent-org-b",
+        companyId: "org-b",
+        name: "OrgB-Codex",
+        adapterType: "codex_local",
+        adapterConfig: { engine: "cli" },
+      },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: {
+        engine: "cli",
+        command: fakeCodexPath,
+        cwd: workspaceDir,
+        env: { OPENAI_API_KEY: "", CODEX_AUTH_JSON: secret },
+      },
+      context: {},
+      onLog: async (_stream, chunk) => {
+        logs.push(chunk);
+      },
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errorMessage).toContain(REDACTED_CODEX_ACCOUNT_HANDLE);
+    expect(result.errorMessage).not.toContain("acct-cli-fail-handle");
+    expect(JSON.stringify(result)).not.toContain("acct-cli-fail-handle");
+    expect(logs.join("")).not.toContain("acct-cli-fail-handle");
   });
 
   it("fails closed when CODEX_AUTH_JSON is malformed instead of falling back to shared host user X", async () => {
@@ -861,5 +937,66 @@ describe("ACP lane CODEX_AUTH_JSON wiring", () => {
     });
     expect(envTest.status).toBe("fail");
     expect(envTest.checks.some((c) => c.code === "codex_auth_json_invalid")).toBe(true);
+  });
+
+  it("redacts accountHandle from returned AdapterExecutionResult when ACP runtime fails naming CODEX_HOME", async () => {
+    const root = await makeScratchDir("paperclip-codex-acp-fail-redact-");
+    const workspaceDir = path.join(root, "workspace");
+    await mkdir(workspaceDir, { recursive: true });
+    vi.stubEnv("PAPERCLIP_HOME", root);
+    vi.stubEnv("PAPERCLIP_INSTANCE_ID", "default");
+    vi.stubEnv("CODEX_HOME", path.join(root, "shared"));
+
+    const handle = "acct-acp-fail-handle";
+    const secret = subscriptionAuthJson({
+      accountId: handle,
+      lastRefresh: "2026-10-01T11:00:00Z",
+      marker: "acp-fail",
+    });
+
+    const failingRuntime = () => ({
+      ensureSession: async () => {
+        throw new Error(`failed to read /paperclip/companies/org-b/codex-auth-cache/${handle}/config.toml`);
+      },
+      startTurn: () => {
+        throw new Error("not reached");
+      },
+      getCapabilities: () => ({ controls: [] }),
+      getStatus: async () => ({}),
+      setConfigOption: async () => {},
+      setMode: async () => {},
+      close: async () => {},
+    }) as never;
+
+    const acpExec = createCodexAcpExecutor({ createRuntime: failingRuntime });
+    const logs: string[] = [];
+    const result = await acpExec({
+      runId: "run-acp-fail-redact",
+      agent: {
+        id: "agent-acp-fail",
+        companyId: "org-b",
+        name: "OrgB-ACP",
+        adapterType: "codex_local",
+        adapterConfig: { engine: "acp" },
+      },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: {
+        engine: "acp",
+        cwd: workspaceDir,
+        agentCommand: "node ./fake-acp.js",
+        stateDir: path.join(root, "state"),
+        env: { OPENAI_API_KEY: "", CODEX_AUTH_JSON: secret },
+      },
+      context: {},
+      onLog: async (_stream, chunk) => {
+        logs.push(chunk);
+      },
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errorMessage).toContain(REDACTED_CODEX_ACCOUNT_HANDLE);
+    expect(result.errorMessage).not.toContain(handle);
+    expect(JSON.stringify(result)).not.toContain(handle);
+    expect(logs.join("")).not.toContain(handle);
   });
 });

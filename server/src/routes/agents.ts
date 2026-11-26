@@ -2369,8 +2369,8 @@ export function agentRoutes(
       if (existingEnv && existingEnv[key] !== undefined) continue;
       if (
         harness === "codex_local" &&
-        ((key === "CODEX_AUTH_JSON" && codexLocalEnvKeyConfigured(existingEnv?.OPENAI_API_KEY)) ||
-          (key === "OPENAI_API_KEY" && codexLocalEnvKeyConfigured(existingEnv?.CODEX_AUTH_JSON)))
+        ((key === "CODEX_AUTH_JSON" && codexLocalEnvKeyConfigured(nextEnv.OPENAI_API_KEY)) ||
+          (key === "OPENAI_API_KEY" && codexLocalEnvKeyConfigured(nextEnv.CODEX_AUTH_JSON)))
       ) {
         continue;
       }

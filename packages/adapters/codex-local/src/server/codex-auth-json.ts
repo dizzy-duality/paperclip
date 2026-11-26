@@ -279,13 +279,60 @@ export function wrapOnMetaRedactingCodexAccountHandle(
     });
 }
 
-/** Redacts `accountHandle` from an Error's message before rethrowing. */
+/** Deeply redacts `accountHandle` from every string in a plain value (objects/arrays/strings). */
+export function redactCodexAccountHandleInValue<T>(
+  value: T,
+  accountHandle: string | null | undefined,
+): T {
+  if (!accountHandle) return value;
+  const seen = new WeakMap<object, unknown>();
+  const walk = (node: unknown): unknown => {
+    if (typeof node === "string") {
+      return redactCodexAccountHandleInText(node, accountHandle);
+    }
+    if (node === null || typeof node !== "object") {
+      return node;
+    }
+    if (seen.has(node)) {
+      return seen.get(node);
+    }
+    if (Array.isArray(node)) {
+      const out: unknown[] = [];
+      seen.set(node, out);
+      for (const item of node) out.push(walk(item));
+      return out;
+    }
+    if (node instanceof Date || Buffer.isBuffer(node) || node instanceof RegExp) {
+      return node;
+    }
+    const out: Record<string, unknown> = {};
+    seen.set(node, out);
+    for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
+      out[redactCodexAccountHandleInText(k, accountHandle)] = walk(v);
+    }
+    return out;
+  };
+  return walk(value) as T;
+}
+
+/** Redacts `accountHandle` from an Error's message, stack, and path/dest fields before rethrowing. */
 export function redactCodexAccountHandleInError(
   error: unknown,
   accountHandle: string | null | undefined,
 ): unknown {
   if (!accountHandle || !(error instanceof Error)) return error;
-  if (!error.message.includes(accountHandle)) return error;
-  error.message = redactCodexAccountHandleInText(error.message, accountHandle);
+  if (error.message.includes(accountHandle)) {
+    error.message = redactCodexAccountHandleInText(error.message, accountHandle);
+  }
+  if (typeof error.stack === "string" && error.stack.includes(accountHandle)) {
+    error.stack = redactCodexAccountHandleInText(error.stack, accountHandle);
+  }
+  const errnoErr = error as Error & { path?: unknown; dest?: unknown };
+  if (typeof errnoErr.path === "string" && errnoErr.path.includes(accountHandle)) {
+    errnoErr.path = redactCodexAccountHandleInText(errnoErr.path, accountHandle);
+  }
+  if (typeof errnoErr.dest === "string" && errnoErr.dest.includes(accountHandle)) {
+    errnoErr.dest = redactCodexAccountHandleInText(errnoErr.dest, accountHandle);
+  }
   return error;
 }

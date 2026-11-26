@@ -885,7 +885,8 @@ export async function resolveCodexAuthCopyBackTarget(
       if (resolved) return resolved;
     }
   }
-  return path.join(resolveSharedCodexHomeDir(env), "auth.json");
+  const fallback = path.join(resolveSharedCodexHomeDir(env), "auth.json");
+  return fs.realpath(fallback).catch(() => fallback);
 }
 
 export interface ResolveCodexVendTargetInput {
