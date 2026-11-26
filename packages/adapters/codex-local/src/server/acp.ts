@@ -43,9 +43,20 @@ import { normalizeCodexModel } from "../index.js";
 import { classifyCodexAuthRefreshFailure, extractCodexRetryNotBefore } from "./parse.js";
 import { copyBackCodexAuth } from "./codex-auth-copyback.js";
 import {
+  CODEX_AUTH_JSON_ENV_KEY,
+  materializeCodexAuthJsonSecret,
+  redactCodexAccountHandleInError,
+  redactCodexAccountHandleInValue,
+  stripCodexAuthJsonFromEnv,
+  wrapOnEventRedactingCodexAccountHandle,
+  wrapOnLogRedactingCodexAccountHandle,
+  wrapOnMetaRedactingCodexAccountHandle,
+  wrapOnRuntimeProgressRedactingCodexAccountHandle,
+} from "./codex-auth-json.js";
+import {
   buildCodexHomeRefreshProvision,
   evaluateCodexCredentialReadiness,
-  resolveSharedCodexHomeDir,
+  resolveCodexAuthCopyBackTarget,
   stageCodexHomeForSync,
 } from "./codex-home.js";
 import { ADAPTER_AUTH_MISSING_CHECK_CODE } from "./auth-check.js";
@@ -215,7 +226,13 @@ async function prepareCodexRemoteManagedHome(
         restore: apiKeyAuth ? undefined : async ({ assetDir, readFile }) =>
           void (await copyBackCodexAuth({
             readSandboxAuth: () => readFile(path.posix.join(assetDir, "auth.json")),
-            hostAuthPath: path.join(input.config.managedAiConnection ? effectiveCodexHome : resolveSharedCodexHomeDir(process.env), "auth.json"),
+            hostAuthPath: await resolveCodexAuthCopyBackTarget({
+              env: process.env,
+              companyId: input.companyId,
+              managedAiConnection: Boolean(input.config.managedAiConnection),
+              runtimeCredentialHome: null,
+              effectiveCodexHome,
+            }),
             log: (line) => onLog("stdout", `${line}\n`),
           })),
       },
@@ -384,11 +401,44 @@ export function createCodexAcpExecutor(options: CodexAcpExecutorOptions = {}): C
       currentExecutor = createAcpxEngineExecutor(withCodexAcpDefaults(options));
       executor = currentExecutor;
     }
-    const result = await currentExecutor({
-      ...ctx,
-      config: buildCodexAcpConfig(ctx.config),
-    });
-    return withCodexAuthRefreshFailureClassification(result);
+    const rawConfig = parseObject(ctx.config);
+    const rawEnv = parseObject(rawConfig.env);
+    const configuredApiKey = firstNonEmptyString(rawEnv.OPENAI_API_KEY);
+    const configuredAuthJson =
+      !rawConfig.managedAiConnection && !configuredApiKey
+        ? firstNonEmptyString(rawEnv[CODEX_AUTH_JSON_ENV_KEY])
+        : undefined;
+    const sanitizedEnv: Record<string, unknown> = { ...stripCodexAuthJsonFromEnv(rawEnv) };
+    let materializedAccountHandle: string | null = null;
+    if (configuredAuthJson) {
+      const materialized = await materializeCodexAuthJsonSecret({
+        raw: configuredAuthJson,
+        companyId: ctx.agent.companyId,
+        env: process.env,
+        log: (line) => ctx.onLog("stdout", `${line}\n`),
+      });
+      materializedAccountHandle = materialized.accountHandle;
+      sanitizedEnv.CODEX_HOME = materialized.accountHomeDir;
+    }
+    try {
+      const result = await currentExecutor({
+        ...ctx,
+        onLog: wrapOnLogRedactingCodexAccountHandle(ctx.onLog, materializedAccountHandle),
+        onMeta: wrapOnMetaRedactingCodexAccountHandle(ctx.onMeta, materializedAccountHandle),
+        onEvent: wrapOnEventRedactingCodexAccountHandle(ctx.onEvent, materializedAccountHandle),
+        onRuntimeProgress: wrapOnRuntimeProgressRedactingCodexAccountHandle(
+          ctx.onRuntimeProgress,
+          materializedAccountHandle,
+        ),
+        config: buildCodexAcpConfig({ ...rawConfig, env: sanitizedEnv }),
+      });
+      return redactCodexAccountHandleInValue(
+        withCodexAuthRefreshFailureClassification(result),
+        materializedAccountHandle,
+      );
+    } catch (error) {
+      throw redactCodexAccountHandleInError(error, materializedAccountHandle);
+    }
   };
 }
 
@@ -598,8 +648,11 @@ export async function testCodexAcpEnvironment(
   const envConfig = parseObject(config.env);
   if (!targetIsRemote) {
     const configApiKey = isNonEmpty(envConfig.OPENAI_API_KEY) ? envConfig.OPENAI_API_KEY : null;
+    const configuredAuthJson = !config.managedAiConnection && !configApiKey && isNonEmpty(envConfig[CODEX_AUTH_JSON_ENV_KEY])
+      ? envConfig[CODEX_AUTH_JSON_ENV_KEY]
+      : null;
     const hostApiKey =
-      Object.prototype.hasOwnProperty.call(envConfig, "OPENAI_API_KEY")
+      configuredAuthJson || Object.prototype.hasOwnProperty.call(envConfig, "OPENAI_API_KEY")
         ? null
         : isNonEmpty(process.env.OPENAI_API_KEY)
         ? process.env.OPENAI_API_KEY
@@ -611,9 +664,17 @@ export async function testCodexAcpEnvironment(
       companyId: ctx.companyId,
       configuredCodexHome,
       configuredApiKey,
+      configuredAuthJson,
     });
 
-    if (credentialReadiness.ready && credentialReadiness.authMode === "api") {
+    if (credentialReadiness.invalidReason === "invalid_codex_auth_json") {
+      checks.push({
+        code: "codex_auth_json_invalid",
+        level: "error",
+        message: "CODEX_AUTH_JSON is invalid: expected a ChatGPT subscription auth.json payload (raw JSON or base64) with tokens and account_id.",
+        hint: "Store the raw JSON or base64-encoded contents of ~/.codex/auth.json from `codex login` in the CODEX_AUTH_JSON secret.",
+      });
+    } else if (credentialReadiness.ready && credentialReadiness.authMode === "api") {
       checks.push({
         code: "codex_acp_openai_api_key_detected",
         level: "info",
@@ -648,13 +709,24 @@ export async function testCodexAcpEnvironment(
     // environment is not seeded, so only the adapter config key counts here.
     const configApiKey = isNonEmpty(envConfig.OPENAI_API_KEY) ? envConfig.OPENAI_API_KEY : null;
     const configuredCodexHome = isNonEmpty(envConfig.CODEX_HOME) ? envConfig.CODEX_HOME : null;
+    const configuredAuthJson = !config.managedAiConnection && isNonEmpty(envConfig[CODEX_AUTH_JSON_ENV_KEY])
+      ? envConfig[CODEX_AUTH_JSON_ENV_KEY]
+      : null;
     const credentialReadiness = await evaluateCodexCredentialReadiness({
       env: process.env,
       companyId: ctx.companyId,
       configuredCodexHome,
       configuredApiKey: configApiKey,
+      configuredAuthJson,
     });
-    if (!credentialReadiness.ready) {
+    if (credentialReadiness.invalidReason === "invalid_codex_auth_json") {
+      checks.push({
+        code: "codex_auth_json_invalid",
+        level: "error",
+        message: "CODEX_AUTH_JSON is invalid: expected a ChatGPT subscription auth.json payload (raw JSON or base64) with tokens and account_id.",
+        hint: "Store the raw JSON or base64-encoded contents of ~/.codex/auth.json from `codex login` in the CODEX_AUTH_JSON secret.",
+      });
+    } else if (!credentialReadiness.ready) {
       // Emit the neutral canonical check so the user interface can decide login
       // eligibility from a stable code. The user interface does not read the
       // message text or the top-level status.

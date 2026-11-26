@@ -76,7 +76,7 @@ export function startLocalBrowserLogin(provider: "anthropic" | "openai" | "googl
       if (controller.signal.aborted) throw new Error("Local sign-in cancelled before launch");
       const env = { ...process.env,
         ANTHROPIC_API_KEY: "", ANTHROPIC_AUTH_TOKEN: "", CLAUDE_CODE_OAUTH_TOKEN: "",
-        OPENAI_API_KEY: "", CODEX_API_KEY: "",
+        OPENAI_API_KEY: "", CODEX_API_KEY: "", CODEX_AUTH_JSON: "",
         CLAUDE_CONFIG_DIR: provider === "anthropic" ? home : process.env.CLAUDE_CONFIG_DIR,
         CODEX_HOME: provider === "openai" ? home : process.env.CODEX_HOME,
         BROWSER: "true",

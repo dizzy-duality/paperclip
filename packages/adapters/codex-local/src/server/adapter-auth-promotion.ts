@@ -7,7 +7,11 @@ import {
   readSubscriptionAccountId,
 } from "./codex-auth-cache.js";
 import { writeCredentialSeedOrNewer } from "./codex-auth-seed-write.js";
-import { codexHomeHasUsableAuth, resolveManagedCodexHomeDir } from "./codex-home.js";
+import {
+  codexHomeHasUsableAuth,
+  resolveManagedCodexHomeDir,
+  resolveSharedCodexHomeDir,
+} from "./codex-home.js";
 import { assertUsableSubscriptionShape } from "./device-login-export.js";
 
 // The device-login credential promotion. It runs after a successful device
@@ -288,10 +292,12 @@ export async function promoteDeviceLoginCredential(
   try {
     await mkdir(companyHome, { recursive: true, mode: PRIVATE_DIR_MODE });
     const companyHomeAuthPath = path.join(companyHome, AUTH_FILE_NAME);
+    const sharedHostAuthPath = path.join(resolveSharedCodexHomeDir(env), AUTH_FILE_NAME);
     await writeCredentialSeedOrNewer({
       sourceBytes: authBytes,
       destinationPath: companyHomeAuthPath,
       seedIfDestAbsent: true,
+      replaceInheritedSymlinkTargeting: sharedHostAuthPath,
       log,
       writtenLine:
         "[paperclip] Codex device-login promotion: wrote the company default home (seed or strictly-newer refresh).",

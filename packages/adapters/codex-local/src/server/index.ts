@@ -14,14 +14,38 @@ export {
   reconcileManagedCodexHome,
   isManagedCodexHomePath,
   resolveManagedCodexHomeDir,
+  resolveCodexAuthCopyBackTarget,
+  resolveCodexVendTargetAuthPath,
   evaluateCodexCredentialReadiness,
   type ReconcileManagedCodexHomeInput,
   type ReconcileManagedCodexHomeResult,
   type ReconcileManagedCodexHomeStatus,
+  type ResolveCodexAuthCopyBackTargetInput,
+  type ResolveCodexVendTargetInput,
   type CodexCredentialReadiness,
   type CodexCredentialReadinessInput,
   type CodexCredentialAuthMode,
 } from "./codex-home.js";
+export {
+  CODEX_AUTH_JSON_ENV_KEY,
+  MAX_FUTURE_LAST_REFRESH_SKEW_MS,
+  REDACTED_CODEX_ACCOUNT_HANDLE,
+  InvalidCodexAuthJsonError,
+  parseCodexAuthJsonEnv,
+  materializeCodexAuthJsonSecret,
+  stripCodexAuthJsonFromEnv,
+  redactCodexAccountHandleInText,
+  redactCodexAccountHandleInValue,
+  wrapOnLogRedactingCodexAccountHandle,
+  wrapOnMetaRedactingCodexAccountHandle,
+  wrapOnEventRedactingCodexAccountHandle,
+  wrapOnRuntimeProgressRedactingCodexAccountHandle,
+  redactCodexAccountHandleInError,
+  type ParsedCodexAuthJson,
+  type ParseCodexAuthJsonOptions,
+  type MaterializeCodexAuthJsonInput,
+  type MaterializeCodexAuthJsonResult,
+} from "./codex-auth-json.js";
 export { listCodexSkills, syncCodexSkills } from "./skills.js";
 export { testEnvironment } from "./test.js";
 export {

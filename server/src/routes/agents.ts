@@ -2306,7 +2306,7 @@ export function agentRoutes(
   // out of this list.
   const INHERITABLE_AGENT_CREDENTIAL_ENV_KEYS: Record<string, readonly string[]> = {
     claude_local: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"],
-    codex_local: ["OPENAI_API_KEY", "CODEX_API_KEY"],
+    codex_local: ["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_AUTH_JSON"],
     grok_local: ["XAI_API_KEY"],
     // OpenCode reaches its models through OpenRouter, the provider account
     // AI connections bind for opencode_local.
@@ -2367,6 +2367,13 @@ export function agentRoutes(
     let changed = false;
     for (const key of credentialKeys) {
       if (existingEnv && existingEnv[key] !== undefined) continue;
+      if (
+        harness === "codex_local" &&
+        ((key === "CODEX_AUTH_JSON" && codexLocalEnvKeyConfigured(nextEnv.OPENAI_API_KEY)) ||
+          (key === "OPENAI_API_KEY" && codexLocalEnvKeyConfigured(nextEnv.CODEX_AUTH_JSON)))
+      ) {
+        continue;
+      }
       const parentValue = parentEnv[key];
       if (!isInheritableCredentialReference(parentValue)) continue;
       nextEnv[key] = { ...parentValue };

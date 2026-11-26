@@ -1,7 +1,8 @@
-import { open, rename, rm } from "node:fs/promises";
+import { lstat, open, readFile, readlink, rename, rm } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { withDirectoryMergeLock } from "@paperclipai/adapter-utils/workspace-restore-merge";
+import { readSubscriptionAccountId } from "./codex-auth-cache.js";
 import { USE_SOURCE_EXIT, decideCodexAuthMerge } from "./codex-auth-merge-decision.js";
 
 // The one atomic credential writer. It stages the source bytes into a private
@@ -35,6 +36,36 @@ export interface WriteCredentialSeedOrNewerInput {
   errorLabel: string;
   /** Environment for the merge lock root. Defaults to `process.env`. */
   env?: NodeJS.ProcessEnv;
+  /**
+   * Optional absolute target path of an inherited shared-host symlink that may
+   * be atomically replaced when `sourceBytes` holds a *different* subscription
+   * identity (or when the symlink target is unreadable/non-subscription). A
+   * regular file (e.g. a previously promoted company account) or a symlink to
+   * any other target is never bypassed and still goes through the shared merge
+   * predicate. Never writes through the symlink.
+   */
+  replaceInheritedSymlinkTargeting?: string;
+}
+
+async function isInheritedDifferentAccountSymlink(
+  destinationPath: string,
+  expectedTargetPath: string,
+  sourceBytes: Buffer,
+): Promise<boolean> {
+  const existing = await lstat(destinationPath).catch(() => null);
+  if (!existing?.isSymbolicLink()) return false;
+  const linked = await readlink(destinationPath).catch(() => null);
+  if (!linked) return false;
+  const resolvedLink = path.resolve(path.dirname(destinationPath), linked);
+  if (resolvedLink !== path.resolve(expectedTargetPath)) return false;
+  const sourceIdentity = readSubscriptionAccountId(sourceBytes);
+  if (!sourceIdentity) return false;
+  const targetBytes = await readFile(resolvedLink).catch(() => null);
+  const targetIdentity = targetBytes ? readSubscriptionAccountId(targetBytes) : null;
+  // Same identity still goes through `decideCodexAuthMerge` so freshness rules
+  // apply unchanged; a different (or absent/unusable) inherited host login is
+  // replaced atomically at the symlink path itself.
+  return targetIdentity !== sourceIdentity;
 }
 
 /**
@@ -61,10 +92,19 @@ export async function writeCredentialSeedOrNewer(
       try {
         await handle.writeFile(input.sourceBytes);
         await handle.close();
-        const decision = await decideCodexAuthMerge(stagedTempPath, input.destinationPath, {
-          seedIfDestAbsent: input.seedIfDestAbsent,
-          errorLabel: input.errorLabel,
-        });
+        const shouldReplaceInheritedSymlink =
+          input.replaceInheritedSymlinkTargeting != null &&
+          (await isInheritedDifferentAccountSymlink(
+            input.destinationPath,
+            input.replaceInheritedSymlinkTargeting,
+            input.sourceBytes,
+          ));
+        const decision = shouldReplaceInheritedSymlink
+          ? USE_SOURCE_EXIT
+          : await decideCodexAuthMerge(stagedTempPath, input.destinationPath, {
+              seedIfDestAbsent: input.seedIfDestAbsent,
+              errorLabel: input.errorLabel,
+            });
         if (decision === USE_SOURCE_EXIT) {
           await rename(stagedTempPath, input.destinationPath);
           await input.log(input.writtenLine);

@@ -415,6 +415,43 @@ describe("device-login credential promotion", () => {
     expect(await readFile(hostAuthPath, "utf8")).toBe(hostBytes.toString("utf8"));
   });
 
+  it("a different-account login replaces an inherited shared-host symlink without modifying the host file", async () => {
+    // When a company default home previously inherited the shared host login
+    // via a symlink (user X), a colleague (user Y) completing a device login
+    // for that company must claim the company default home atomically without
+    // touching the host auth.json.
+    const home = await makeInstanceRoot();
+    const sharedHostDir = path.join(home, "shared-host-codex");
+    const env = { ...envFor(home), CODEX_HOME: sharedHostDir };
+    const sharedHostAuthPath = path.join(sharedHostDir, "auth.json");
+    const hostBytes = subscriptionAuth({ accountId: ACCOUNT, lastRefresh: NEWER, marker: "host-user-x" });
+    await mkdir(sharedHostDir, { recursive: true, mode: 0o700 });
+    await writeFile(sharedHostAuthPath, hostBytes);
+
+    const companyHome = resolveManagedCodexHomeDir(env, COMPANY_B);
+    await mkdir(companyHome, { recursive: true, mode: 0o700 });
+    await symlink(sharedHostAuthPath, companyHomeAuthPath(env, COMPANY_B));
+
+    await promoteDeviceLoginCredential({
+      authBytes: subscriptionAuth({ accountId: OTHER_ACCOUNT, lastRefresh: OLDER, marker: "colleague-y" }),
+      companyId: COMPANY_B,
+      userInitiated: true,
+      checkReadiness: ready,
+      isSoleActiveOwner: soleOwner,
+      env,
+      log: noopLog,
+    });
+
+    const stat = await lstat(companyHomeAuthPath(env, COMPANY_B));
+    expect(stat.isSymbolicLink()).toBe(false);
+    expect(stat.mode & 0o777).toBe(0o600);
+    const homeAuth = JSON.parse(await readFile(companyHomeAuthPath(env, COMPANY_B), "utf8"));
+    expect(homeAuth.tokens.account_id).toBe(OTHER_ACCOUNT);
+    expect(homeAuth.tokens.refresh_token).toContain("colleague-y");
+    // User X's shared host auth.json was never modified.
+    expect(await readFile(sharedHostAuthPath, "utf8")).toBe(hostBytes.toString("utf8"));
+  });
+
   it("promotion fails the login when the account identifier cannot become a handle", async () => {
     const home = await makeInstanceRoot();
     const env = envFor(home);

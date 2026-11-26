@@ -169,7 +169,9 @@ export async function copyBackCodexAuth(input: CopyBackCodexAuthInput): Promise<
       const sandboxAccountId = readSubscriptionAccountId(sandboxAuthBytes);
       if (sandboxAccountId) {
         const cacheEntryPath = await resolveCacheEntryPath(sandboxAccountId);
-        await writeCodexAuthCacheEntry({ sandboxAuthBytes, cacheEntryPath, log, env });
+        if (path.resolve(cacheEntryPath) !== path.resolve(hostAuthPath)) {
+          await writeCodexAuthCacheEntry({ sandboxAuthBytes, cacheEntryPath, log, env });
+        }
       }
     } catch (error) {
       // Log only the errno code, never the error message. The message embeds the

@@ -187,6 +187,64 @@ describeEmbeddedPostgres("hired agent provider credential inheritance", () => {
     });
   });
 
+  it("inherits the parent CODEX_AUTH_JSON secret_ref for a codex_local hire without mixing with child OPENAI_API_KEY", async () => {
+    const companyId = await seedCompany();
+    const authJsonSecret = await createCompanySecret(
+      companyId,
+      JSON.stringify({
+        auth_mode: "chatgpt",
+        tokens: { access_token: "a", refresh_token: "r", account_id: "acct-colleague" },
+      }),
+    );
+    const apiKeySecret = await createCompanySecret(companyId, "sk-child-override");
+    const parent = await seedParentAgent(companyId, "codex_local", {
+      CODEX_AUTH_JSON: secretRef(authJsonSecret.id),
+    });
+
+    const inheritedRes = await hire(agentActor(companyId, parent.id), companyId, {
+      name: "Codex Subscription Child",
+      role: "engineer",
+      adapterType: "codex_local",
+    });
+    expect(inheritedRes.status, JSON.stringify(inheritedRes.body)).toBe(201);
+    expect(childEnvOf(inheritedRes).CODEX_AUTH_JSON).toMatchObject({
+      type: "secret_ref",
+      secretId: authJsonSecret.id,
+    });
+
+    const overrideRes = await hire(agentActor(companyId, parent.id), companyId, {
+      name: "Codex ApiKey Child",
+      role: "engineer",
+      adapterType: "codex_local",
+      adapterConfig: {
+        env: { OPENAI_API_KEY: secretRef(apiKeySecret.id) },
+      },
+    });
+    expect(overrideRes.status, JSON.stringify(overrideRes.body)).toBe(201);
+    expect(childEnvOf(overrideRes).OPENAI_API_KEY).toMatchObject({
+      type: "secret_ref",
+      secretId: apiKeySecret.id,
+    });
+    expect(childEnvOf(overrideRes).CODEX_AUTH_JSON).toBeUndefined();
+
+    // Parent binding BOTH OPENAI_API_KEY and CODEX_AUTH_JSON only passes OPENAI_API_KEY to child.
+    const bothParent = await seedParentAgent(companyId, "codex_local", {
+      OPENAI_API_KEY: secretRef(apiKeySecret.id),
+      CODEX_AUTH_JSON: secretRef(authJsonSecret.id),
+    });
+    const bothChildRes = await hire(agentActor(companyId, bothParent.id), companyId, {
+      name: "Codex Both Parent Child",
+      role: "engineer",
+      adapterType: "codex_local",
+    });
+    expect(bothChildRes.status, JSON.stringify(bothChildRes.body)).toBe(201);
+    expect(childEnvOf(bothChildRes).OPENAI_API_KEY).toMatchObject({
+      type: "secret_ref",
+      secretId: apiKeySecret.id,
+    });
+    expect(childEnvOf(bothChildRes).CODEX_AUTH_JSON).toBeUndefined();
+  });
+
   it("keeps a pinned version selector on the copied reference and its derived binding", async () => {
     const companyId = await seedCompany();
     const secret = await createCompanySecret(companyId, "sk-openai-pinned");

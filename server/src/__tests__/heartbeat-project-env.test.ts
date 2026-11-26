@@ -807,6 +807,73 @@ describe("resolveExecutionRunAdapterConfig codex_local credential pre-dispatch g
     expect(result.resolvedConfig.command).toBe("codex");
   });
 
+  it("dispatches normally when a valid CODEX_AUTH_JSON secret is resolved with no shared host auth", async () => {
+    const { managedAgentHome } = await stubManagedCodexEnv({ seedSharedAuth: false });
+    const authJson = JSON.stringify({
+      auth_mode: "chatgpt",
+      tokens: {
+        id_token: "id-colleague",
+        access_token: "access-colleague",
+        refresh_token: "refresh-colleague",
+        account_id: "acct-colleague-y",
+      },
+      last_refresh: "2026-10-01T10:00:00Z",
+    });
+    const resolveAdapterConfigForRuntime = vi.fn().mockResolvedValue({
+      config: { command: "codex", env: { CODEX_HOME: managedAgentHome, OPENAI_API_KEY: "", CODEX_AUTH_JSON: authJson } },
+      secretKeys: new Set(["CODEX_AUTH_JSON"]),
+      manifest: [],
+    });
+
+    const result = await resolveExecutionRunAdapterConfig({
+      companyId: "company-1",
+      agentId: "agent-1",
+      adapterType: "codex_local",
+      executionRunConfig: { command: "codex", env: { CODEX_HOME: managedAgentHome, CODEX_AUTH_JSON: { type: "secret_ref" } } },
+      projectEnv: null,
+      secretsSvc: {
+        resolveAdapterConfigForRuntime,
+        resolveEnvBindings: vi.fn(),
+        collectMissingRuntimeBindings: vi.fn().mockResolvedValue([]),
+      } as any,
+    });
+    expect(result.resolvedConfig.command).toBe("codex");
+  });
+
+  it("blocks dispatch as configuration_incomplete when CODEX_AUTH_JSON is invalid, even on sandbox targets with host auth", async () => {
+    const { managedAgentHome } = await stubManagedCodexEnv({ seedSharedAuth: true });
+    const resolveAdapterConfigForRuntime = vi.fn().mockResolvedValue({
+      config: { command: "codex", env: { CODEX_HOME: managedAgentHome, OPENAI_API_KEY: "", CODEX_AUTH_JSON: "bad-secret-value-xyz" } },
+      secretKeys: new Set(["CODEX_AUTH_JSON"]),
+      manifest: [],
+    });
+
+    await expect(
+      resolveExecutionRunAdapterConfig({
+        companyId: "company-1",
+        agentId: "agent-1",
+        adapterType: "codex_local",
+        environmentDriver: "sandbox",
+        executionRunConfig: { command: "codex", env: { CODEX_HOME: managedAgentHome, CODEX_AUTH_JSON: { type: "secret_ref" } } },
+        projectEnv: null,
+        secretsSvc: {
+          resolveAdapterConfigForRuntime,
+          resolveEnvBindings: vi.fn(),
+          collectMissingRuntimeBindings: vi.fn().mockResolvedValue([]),
+        } as any,
+      }),
+    ).rejects.toMatchObject({
+      code: "configuration_incomplete",
+      resultJson: {
+        configurationIncomplete: {
+          reason: "codex_auth_json_invalid",
+          adapterType: "codex_local",
+          requiredEnvKeys: ["CODEX_AUTH_JSON"],
+        },
+      },
+    });
+  });
+
   it("does not gate non-codex adapters", async () => {
     await stubManagedCodexEnv({ seedSharedAuth: false });
     const resolveAdapterConfigForRuntime = vi.fn().mockResolvedValue({

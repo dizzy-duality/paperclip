@@ -616,37 +616,60 @@ export async function resolveExecutionRunAdapterConfig(input: {
   // adapter can probe once the sandbox is up — and on managed cloud hosts a
   // host-side login never exists at all. The adapter's execute-time gate
   // remains the authority there; it probes the sandbox before failing.
-  if (
-    !input.managedAiCredentials && (input.adapterType ?? null) === "codex_local" &&
-    (input.environmentDriver ?? null) !== "sandbox"
-  ) {
+  if (!input.managedAiCredentials && (input.adapterType ?? null) === "codex_local") {
     const resolvedEnv = parseObject(resolvedConfig.env);
-    const readiness = await evaluateCodexCredentialReadiness({
-      env: process.env,
-      companyId: input.companyId,
-      configuredCodexHome: readNonEmptyString(resolvedEnv.CODEX_HOME),
-      configuredApiKey: readNonEmptyString(resolvedEnv.OPENAI_API_KEY),
-    });
-    if (readiness.managed && !readiness.ready) {
-      throw new ConfigurationIncompleteFailure(
-        `configuration incomplete: no Codex credentials available for managed home "${readiness.effectiveHome}". ` +
-          `Sign in to Codex on the host with a ChatGPT subscription, or bind a per-agent OPENAI_API_KEY secret for this agent.`,
-        {
-          configurationIncomplete: {
-            reason: "codex_credentials_missing",
-            companyId: input.companyId,
-            agentId: input.agentId ?? null,
-            issueId: input.issueId ?? null,
-            projectId: input.projectId ?? null,
-            routineId: input.routineId ?? null,
-            responsibleUserId: input.responsibleUserId ?? null,
-            adapterType: "codex_local",
-            requiredEnvKeys: ["OPENAI_API_KEY"],
-            effectiveCodexHome: readiness.effectiveHome,
-            missingBindings: [],
+    const configuredAuthJson = readNonEmptyString(resolvedEnv.CODEX_AUTH_JSON);
+    const isSandboxDriver = (input.environmentDriver ?? null) === "sandbox";
+    if (!isSandboxDriver || configuredAuthJson) {
+      const readiness = await evaluateCodexCredentialReadiness({
+        env: process.env,
+        companyId: input.companyId,
+        configuredCodexHome: readNonEmptyString(resolvedEnv.CODEX_HOME),
+        configuredApiKey: readNonEmptyString(resolvedEnv.OPENAI_API_KEY),
+        configuredAuthJson,
+      });
+      if (readiness.invalidReason === "invalid_codex_auth_json") {
+        throw new ConfigurationIncompleteFailure(
+          `configuration incomplete: CODEX_AUTH_JSON is invalid for managed home "${readiness.effectiveHome}". ` +
+            `Store the raw JSON or base64-encoded contents of ~/.codex/auth.json from \`codex login\` in the CODEX_AUTH_JSON secret.`,
+          {
+            configurationIncomplete: {
+              reason: "codex_auth_json_invalid",
+              companyId: input.companyId,
+              agentId: input.agentId ?? null,
+              issueId: input.issueId ?? null,
+              projectId: input.projectId ?? null,
+              routineId: input.routineId ?? null,
+              responsibleUserId: input.responsibleUserId ?? null,
+              adapterType: "codex_local",
+              requiredEnvKeys: ["CODEX_AUTH_JSON"],
+              effectiveCodexHome: readiness.effectiveHome,
+              missingBindings: [],
+            },
           },
-        },
-      );
+        );
+      }
+      if (!isSandboxDriver && readiness.managed && !readiness.ready) {
+        throw new ConfigurationIncompleteFailure(
+          `configuration incomplete: no Codex credentials available for managed home "${readiness.effectiveHome}". ` +
+            `Sign in to Codex on the host with a ChatGPT subscription, bind a CODEX_AUTH_JSON secret, or bind a per-agent OPENAI_API_KEY secret for this agent.`,
+          {
+            configurationIncomplete: {
+              reason: "codex_credentials_missing",
+              companyId: input.companyId,
+              agentId: input.agentId ?? null,
+              issueId: input.issueId ?? null,
+              projectId: input.projectId ?? null,
+              routineId: input.routineId ?? null,
+              responsibleUserId: input.responsibleUserId ?? null,
+              adapterType: "codex_local",
+              requiredEnvKeys: ["OPENAI_API_KEY"],
+              effectiveCodexHome: readiness.effectiveHome,
+              missingBindings: [],
+            },
+          },
+        );
+      }
     }
   }
   return {

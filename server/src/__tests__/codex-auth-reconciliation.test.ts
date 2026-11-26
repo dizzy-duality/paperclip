@@ -4,6 +4,8 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Db } from "@paperclipai/db";
 import { reconcileCodexLocalManagedHomesOnStartup } from "../services/codex-auth-reconciliation.js";
+import { AI_AUTH_ENV_KEYS, managedAiSessionFingerprintConfig, stripAiAuthBindings } from "../services/ai-connection-runtime.js";
+import { defaultAiConnectionForHire } from "../services/agent-ai-connection-default.js";
 
 type AgentRow = {
   id: string;
@@ -202,5 +204,49 @@ describe("reconcileCodexLocalManagedHomesOnStartup", () => {
     expect(JSON.parse(await fs.readFile(path.join(agentHome, "auth.json"), "utf8"))).toEqual({
       OPENAI_API_KEY: "sk-plain-1",
     });
+  });
+
+  it("does not seed the shared host symlink when an agent binds CODEX_AUTH_JSON", async () => {
+    const agentHome = managedAgentHome("company-org-b", "agent-colleague");
+    const rows: AgentRow[] = [
+      {
+        id: "agent-colleague",
+        companyId: "company-org-b",
+        adapterConfig: {
+          env: {
+            CODEX_HOME: agentHome,
+            CODEX_AUTH_JSON: { type: "secret_ref", secretId: "22222222-2222-2222-2222-222222222222" },
+          },
+        },
+      },
+    ];
+
+    const summary = await reconcileCodexLocalManagedHomesOnStartup(makeDb(rows));
+    expect(summary).toMatchObject({ scanned: 1, seeded: 0, alreadySeeded: 1, failed: 0 });
+    await expect(fs.lstat(path.join(agentHome, "auth.json"))).rejects.toBeTruthy();
+  });
+
+  it("tracks CODEX_AUTH_JSON across AI auth env stripping, fingerprint redaction, and child override precedence", () => {
+    expect(AI_AUTH_ENV_KEYS).toContain("CODEX_AUTH_JSON");
+    expect(
+      stripAiAuthBindings({ CODEX_AUTH_JSON: { type: "secret_ref", secretId: "sec-1" }, KEEP: "1" }),
+    ).toEqual({ KEEP: "1" });
+
+    const fingerprinted = managedAiSessionFingerprintConfig(
+      {
+        managedAiConnection: { sessionIdentity: "sess-1" },
+        env: { CODEX_AUTH_JSON: "raw-secret-json", OTHER: "keep" },
+      },
+      "/tmp/managed-ai-home",
+    );
+    expect((fingerprinted.env as Record<string, unknown>).CODEX_AUTH_JSON).toBe("<managed-ai-credential>");
+    expect((fingerprinted.env as Record<string, unknown>).OTHER).toBe("keep");
+
+    const inherited = defaultAiConnectionForHire(
+      "codex_local",
+      { env: { CODEX_AUTH_JSON: { type: "secret_ref", secretId: "sec-1" } } },
+      { provider: "openai", method: "subscription", mode: "responsible_user" },
+    );
+    expect(inherited).toBeUndefined();
   });
 });
